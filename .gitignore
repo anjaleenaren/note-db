@@ -3,3 +3,4 @@ __pycache__/*
 .venv
 .vscode
 class_notes.db
+.DS_Store
