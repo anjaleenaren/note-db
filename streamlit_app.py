@@ -14,6 +14,9 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
 from pptx import Presentation
 import re
+import whisper
+import tempfile
+from functools import lru_cache
 
 load_dotenv()
 
@@ -25,16 +28,16 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS classes
                  (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS notes
-                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_url TEXT,
+                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT,
                  FOREIGN KEY (class_id) REFERENCES classes(id))''')
     
-    # Check if file_urls and audio_url columns exist, if not, add them
+    # Check if file_urls and audio_urls columns exist, if not, add them
     c.execute("PRAGMA table_info(notes)")
     columns = [column[1] for column in c.fetchall()]
     if 'file_urls' not in columns:
         c.execute("ALTER TABLE notes ADD COLUMN file_urls TEXT")
-    if 'audio_url' not in columns:
-        c.execute("ALTER TABLE notes ADD COLUMN audio_url TEXT")
+    if 'audio_urls' not in columns:
+        c.execute("ALTER TABLE notes ADD COLUMN audio_urls TEXT")
     
     conn.commit()
     return conn
@@ -83,81 +86,69 @@ def extract_text_from_file(file):
     text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
 
-def add_note(class_name, note_content, files=None, audio_file=None):
+def add_note(class_name, note_content, files=None, audio_files=None):
     c = st.session_state.db_conn.cursor()
     c.execute("SELECT id FROM classes WHERE name = ?", (class_name,))
     class_id = c.fetchone()[0]
     
     file_urls = []
-    audio_url = None
+    audio_urls = []
     
-    # if files:
-    #     for file in files:
-    #         # Extract text from the file
-    #         extracted_text = extract_text_from_file(file)
-    #         # Append extracted text to note_content
-    #         note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
-            
-    #         # Reset file pointer to beginning of file
-    #         file.seek(0)
-            
-    #         file_extension = os.path.splitext(file.name)[1]
-    #         file_filename = f"files/{uuid.uuid4()}{file_extension}"
-    #         if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
-    #             file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
+    if files:
+        for file in files:
+            file_extension = os.path.splitext(file.name)[1]
+            file_filename = f"files/{uuid.uuid4()}{file_extension}"
+            if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
+                file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
     
-    if audio_file:
-        audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
-        if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
-            audio_url = get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename)
+    if audio_files:
+        for audio_file in audio_files:
+            audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
+            if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
+                audio_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename))
     
     # Strip multiple consecutive new lines in note_content
     note_content = re.sub(r'\n{2,}', '\n', note_content)
     
-    c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_url) 
+    c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_urls) 
                  VALUES (?, ?, ?, ?, ?)""",
-              (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), audio_url))
+              (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
     st.session_state.db_conn.commit()
 
-def update_note(note_id, content, files=None, audio_file=None):
+def update_note(note_id, content, files=None, audio_files=None):
     c = st.session_state.db_conn.cursor()
     
     file_urls = []
-    audio_url = None
+    audio_urls = []
     
-    # if files:
-    #     for file in files:
-    #         # Extract text from the file
-    #         extracted_text = extract_text_from_file(file)
-    #         # Append extracted text to content
-    #         content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
-            
-    #         # Reset file pointer to beginning of file
-    #         file.seek(0)
-            
-    #         file_extension = os.path.splitext(file.name)[1]
-    #         file_filename = f"files/{uuid.uuid4()}{file_extension}"
-    #         if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
-    #             file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
+    if files:
+        for file in files:
+            file_extension = os.path.splitext(file.name)[1]
+            file_filename = f"files/{uuid.uuid4()}{file_extension}"
+            if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
+                file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
     
-    if audio_file:
-        audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
-        if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
-            audio_url = get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename)
+    if audio_files:
+        for audio_file in audio_files:
+            audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
+            if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
+                audio_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename))
     
-    # Get existing file_urls
-    c.execute("SELECT file_urls FROM notes WHERE id = ?", (note_id,))
-    existing_file_urls = c.fetchone()[0]
+    # Get existing file_urls and audio_urls
+    c.execute("SELECT file_urls, audio_urls FROM notes WHERE id = ?", (note_id,))
+    existing_file_urls, existing_audio_urls = c.fetchone()
     if existing_file_urls:
         file_urls = existing_file_urls.split(',') + file_urls
+    if existing_audio_urls:
+        audio_urls = existing_audio_urls.split(',') + audio_urls
     
     # Strip multiple consecutive new lines in content
     content = re.sub(r'\n{2,}', '\n', content)
     
     c.execute("""UPDATE notes 
-                 SET content = ?, timestamp = ?, file_urls = ?, audio_url = COALESCE(?, audio_url) 
+                 SET content = ?, timestamp = ?, file_urls = ?, audio_urls = ?
                  WHERE id = ?""",
-              (content, datetime.datetime.now(), ','.join(file_urls), audio_url, note_id))
+              (content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls), note_id))
     st.session_state.db_conn.commit()
 
 def delete_file_from_note(note_id, file_url):
@@ -171,14 +162,14 @@ def delete_file_from_note(note_id, file_url):
 def get_notes(class_name):
     c = st.session_state.db_conn.cursor()
     try:
-        c.execute("""SELECT notes.id, notes.content, notes.timestamp, notes.file_urls, notes.audio_url
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp, notes.file_urls, notes.audio_urls
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
                      ORDER BY notes.timestamp DESC""", (class_name,))
     except sqlite3.OperationalError:
         # If the query fails, fall back to the original schema
-        c.execute("""SELECT notes.id, notes.content, notes.timestamp, NULL as file_urls, NULL as audio_url
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp, NULL as file_urls, NULL as audio_urls
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
@@ -239,6 +230,18 @@ def upload_to_s3(file, bucket_name, object_name):
 
 def get_s3_url(bucket_name, object_name):
     return f"https://{bucket_name}.s3.amazonaws.com/{object_name}"
+
+# Add this cached function for audio transcription
+@lru_cache(maxsize=None)
+def cached_transcribe_audio(file_content):
+    model = whisper.load_model("base")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+        tmp_file.write(file_content)
+        tmp_file_path = tmp_file.name
+
+    result = model.transcribe(tmp_file_path)
+    os.unlink(tmp_file_path)
+    return result["text"]
 
 # Streamlit UI
 st.title("🎓 Class Notes Manager")
@@ -316,15 +319,39 @@ if selected_class:
                 st.session_state.current_note_content = note_content
                 st.experimental_rerun()
     
-    audio_file = st.file_uploader("Upload an audio file", type=["mp3", "wav"])
+    # Audio file upload
+    audio_files = st.file_uploader("Upload audio files (transcription will be performed)", 
+                                   type=["mp3", "wav", "m4a"], 
+                                   accept_multiple_files=True)
+    
+    if 'transcribed_texts' not in st.session_state:
+        st.session_state.transcribed_texts = {}
+
+    if audio_files:
+        for i, audio_file in enumerate(audio_files):
+            st.audio(audio_file)
+            
+            # Check if transcription is already done
+            if audio_file.name not in st.session_state.transcribed_texts:
+                with st.spinner(f"Transcribing {audio_file.name}..."):
+                    transcribed_text = cached_transcribe_audio(audio_file.read())
+                st.session_state.transcribed_texts[audio_file.name] = transcribed_text
+            else:
+                transcribed_text = st.session_state.transcribed_texts[audio_file.name]
+            
+            st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
+            if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
+                note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
+                st.session_state.current_note_content = note_content
+                st.experimental_rerun()
     
     # Save button for the current note
     if st.button("Save Note"):
         if st.session_state.current_note_id:
-            update_note(st.session_state.current_note_id, note_content, files, audio_file)
+            update_note(st.session_state.current_note_id, note_content, files, audio_files)
             st.success("Note updated!")
         else:
-            add_note(selected_class, note_content, files, audio_file)
+            add_note(selected_class, note_content, files, audio_files)
             st.success("New note added!")
         st.session_state.current_note_id = None
         st.session_state.current_note_content = ""
@@ -332,8 +359,8 @@ if selected_class:
     
     # Display existing notes
     st.subheader("Existing Notes")
-    for note_id, note_content, timestamp, file_urls, audio_url in get_notes(selected_class):
-        col1, col2, col3 = st.columns([3, 2, 1])
+    for note_id, note_content, timestamp, file_urls, audio_urls in get_notes(selected_class):
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
         with col1:
             date_only = timestamp.split()[0]
             if st.button(f"{date_only}: {note_content[:50]}...", key=f"note_{note_id}"):
@@ -355,8 +382,13 @@ if selected_class:
                         delete_file_from_note(note_id, file_url)
                         st.experimental_rerun()
         with col3:
-            if audio_url:
-                st.audio(audio_url)
+            if audio_urls:
+                for audio_url in audio_urls.split(','):
+                    st.audio(audio_url)
+                    if st.button("Delete Audio", key=f"delete_audio_{note_id}_{audio_url}"):
+                        delete_file_from_note(note_id, audio_url)
+                        st.experimental_rerun()
+        with col4:
             if st.button("Delete Note", key=f"delete_note_{note_id}"):
                 delete_note(note_id)
                 if st.session_state.current_note_id == note_id:

@@ -1,3 +1,10 @@
 streamlit
-openai
-langchain
+langchain-openai
+python-dotenv
+boto3
+Pillow
+pytesseract
+PyPDF2
+pdf2image
+python-pptx
+openai-whisper
