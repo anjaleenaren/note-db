@@ -37,7 +37,7 @@ def init_db():
                   FOREIGN KEY (class_name) REFERENCES classes(name))''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS notes
-                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT,
+                 (id INTEGER PRIMARY KEY, class_id INTEGER, title TEXT, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT,
                  FOREIGN KEY (class_id) REFERENCES classes(id))''')
     
     # Check if file_urls and audio_urls columns exist, if not, add them
@@ -99,7 +99,8 @@ def extract_text_from_file(file):
     text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
 
-def add_note(class_name, note_content, files=None, audio_files=None):
+def add_note(class_name, note_content, note_title, files=None, audio_files=None):
+    print("Add note id " + note_title)
     c = st.session_state.db_conn.cursor()
     c.execute("SELECT id FROM classes WHERE name = ?", (class_name,))
     class_id = c.fetchone()[0]
@@ -123,9 +124,11 @@ def add_note(class_name, note_content, files=None, audio_files=None):
     # Strip multiple consecutive new lines in note_content
     note_content = re.sub(r'\n{2,}', '\n', note_content)
     
-    c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_urls) 
-                 VALUES (?, ?, ?, ?, ?)""",
-              (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
+    c.execute("""INSERT INTO notes (class_id, title, content, timestamp, file_urls, audio_urls) 
+                 VALUES (?, ?, ?, ?, ?, ?)""",
+              (class_id, note_title, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
+    
+    new_note_id = c.lastrowid  # Get the id of the newly inserted note
     
     # Update the TA index
     c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
@@ -136,8 +139,11 @@ def add_note(class_name, note_content, files=None, audio_files=None):
     class_ta.train(note_content)
     c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
     st.session_state.db_conn.commit()
+    
+    return new_note_id  # Return the id of the newly inserted note
 
-def update_note(note_id, content, files=None, audio_files=None):
+def update_note(note_id, note_content, note_title, files=None, audio_files=None):
+    print(f"Update note id {note_id} {note_title}")
     c = st.session_state.db_conn.cursor()
     
     file_urls = []
@@ -165,12 +171,12 @@ def update_note(note_id, content, files=None, audio_files=None):
         audio_urls = existing_audio_urls.split(',') + audio_urls
     
     # Strip multiple consecutive new lines in content
-    content = re.sub(r'\n{2,}', '\n', content)
+    note_content = re.sub(r'\n{2,}', '\n', note_content)
     
     c.execute("""UPDATE notes 
-                 SET content = ?, timestamp = ?, file_urls = ?, audio_urls = ?
+                 SET title = ?, content = ?, timestamp = ?, file_urls = ?, audio_urls = ?
                  WHERE id = ?""",
-              (content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls), note_id))
+              (note_title, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls), note_id))
     st.session_state.db_conn.commit()
 
 def delete_file_from_note(note_id, file_url):
@@ -183,14 +189,14 @@ def delete_file_from_note(note_id, file_url):
 def get_notes(class_name):
     c = st.session_state.db_conn.cursor()
     try:
-        c.execute("""SELECT notes.id, notes.content, notes.timestamp, notes.file_urls, notes.audio_urls
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp, notes.file_urls, notes.audio_urls, notes.title
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
                      ORDER BY notes.timestamp DESC""", (class_name,))
     except sqlite3.OperationalError:
         # If the query fails, fall back to the original schema
-        c.execute("""SELECT notes.id, notes.content, notes.timestamp, NULL as file_urls, NULL as audio_urls
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp, NULL as file_urls, NULL as audio_urls, notes.title
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
@@ -224,11 +230,23 @@ def clear_database():
 
 
 # Add these new functions
+def save_note(selected_class, note_id, note_content, note_title, files=None, audio_files=None):
+    if not note_title:
+        note_title = generate_title(note_content)
+    print("Note title = " + note_title)
+    if note_id:
+        update_note(note_id, note_content, note_title, files, audio_files)
+        st.success("Note updated!")
+    else:
+        new_note_id = add_note(selected_class, note_content, note_title, files, audio_files)
+        st.session_state.current_note_id = new_note_id  # Save the new note id
+        st.success("New note added!")
+    return note_id or new_note_id
 
 def get_note_by_id(note_id):
     c = st.session_state.db_conn.cursor()
-    c.execute("SELECT content FROM notes WHERE id = ?", (note_id,))
-    return c.fetchone()[0]
+    c.execute("SELECT title, content FROM notes WHERE id = ?", (note_id,))
+    return c.fetchone()
 
 # Add this new function to delete a note
 def delete_note(note_id):
@@ -267,35 +285,30 @@ def cached_transcribe_audio(file_content):
     os.unlink(tmp_file_path)
     return result["text"]
 
+def generate_title(content):
+    if content:
+        try:
+            model = ChatOpenAI(temperature=0.7, api_key=openai_api_key)
+            ret = model.invoke("Generate title for these notes" + content)
+            
+            return ret.content
+        except Exception as e:
+            st.error(f"Error generating title: {str(e)}")
+            return "Untitled Note"
+
 # Streamlit UI
 st.title("🎓 Class Notes Manager")
-
-# Add this new button for clearing the database
-# if st.button("Clear Database"):
-#     clear_database()
-#     st.success("Database cleared successfully!")
-#     st.experimental_rerun()
-
-# Add this new button
-if st.button("Show Database Tables"):
-    tables = get_tables()
-    st.write("Tables in the database:", tables)
-
-# Add these new buttons
-if st.button("Show Classes Data"):
-    classes_data = get_classes_data()
-    st.write("Classes table contents:")
-    st.table(classes_data)
-
-if st.button("Show Notes Data"):
-    notes_data = get_notes_data()
-    st.write("Notes table contents:")
-    st.table(notes_data)
 
 # Sidebar for class management
 st.sidebar.title("Class Management")
 
+# Display existing classes
+st.sidebar.subheader("Existing Classes")
+classes = get_classes()
+selected_class = st.sidebar.selectbox("Select a class:", [""] + classes)
+
 # Add new class
+st.sidebar.subheader("Add a New Class")
 new_class = st.sidebar.text_input("Add a new class:")
 if st.sidebar.button("Add Class"):
     if new_class:
@@ -303,16 +316,30 @@ if st.sidebar.button("Add Class"):
         st.sidebar.success(f"Added {new_class}")
         st.rerun()
 
-# Display existing classes
-st.sidebar.subheader("Existing Classes")
-classes = get_classes()
-selected_class = st.sidebar.selectbox("Select a class:", [""] + classes)
-
 # OpenAI API Key input
+st.sidebar.subheader("Settings")
 openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
 
 # Main content area
 if selected_class:
+    # AI-TA chat
+    st.subheader("AI TA Chat :)")
+    if openai_api_key.startswith("sk-"):
+        chat_input = st.text_input("Ask AI-TA a question about this class:")
+        if st.button("Ask"):
+            c = st.session_state.db_conn.cursor()
+            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
+            serialized_index = c.fetchone()[0]
+            print("serialized_index fetched! ")
+            class_ta = AI_TA.deserialize(serialized_index)
+            print("class_ta deseralized ", class_ta.class_name)
+            openai.api_key = openai_api_key
+            response = class_ta.query(chat_input)
+            print("response generated ", response)
+            st.info(response)
+    else:
+        st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
+
     st.subheader(f"Notes for {selected_class}")
     
     # Initialize session state for current note
@@ -320,10 +347,11 @@ if selected_class:
         st.session_state.current_note_id = None
     if 'current_note_content' not in st.session_state:
         st.session_state.current_note_content = ""
-
+    if 'current_note_title' not in st.session_state:
+        st.session_state.current_note_title = ""
 
     # Text input for notes
-    note_title = st.text_input("Note Title:")
+    note_title = st.text_input("Note Title:", value=st.session_state.current_note_title)
     note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
     
     # File upload for multiple images/PDFs/PPTs
@@ -343,6 +371,7 @@ if selected_class:
             if st.button(f"Append Extracted Text to Note (File {i+1})", key=f"append_button_{i}"):
                 note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
                 st.session_state.current_note_content = note_content
+                save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
                 st.rerun()
     
     # Audio file upload
@@ -369,31 +398,51 @@ if selected_class:
             if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
                 note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
                 st.session_state.current_note_content = note_content
+                save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
                 st.rerun()
     
-    # Save button for the current note
-    if st.button("Save Note"):
-        if st.session_state.current_note_id:
-            update_note(st.session_state.current_note_id, note_content, files, audio_files)
-            st.success("Note updated!")
-        else:
-            add_note(selected_class, note_content, files, audio_files)
-            st.success("New note added!")
-        st.session_state.current_note_id = None
-        st.session_state.current_note_content = ""
-        st.rerun()
+    # Save and New Note buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Save Note"):
+            if not st.session_state.current_note_content:
+                st.warning("Note content is empty. Please add some content before saving.")
+            else: 
+                new_id = save_note(selected_class, st.session_state.current_note_id, note_content, note_title, files, audio_files)
+                st.session_state.current_note_id = None
+                st.session_state.current_note_content = ""
+                st.session_state.current_note_title = ""
+                st.session_state.transcribed_texts = {}
+            st.rerun()
     
+    with col2:
+        if st.button("New Note"):
+            st.session_state.current_note_id = None
+            st.session_state.current_note_content = ""
+            st.session_state.current_note_title = ""
+            st.session_state.transcribed_texts = {}
+            # Clear file uploads
+            st.session_state.files = None
+            st.session_state.audio_files = None
+            # Clear extracted text
+            if 'extracted_texts' in st.session_state:
+                del st.session_state.extracted_texts
+            st.rerun()
+
     # Display existing notes
     st.subheader("Existing Notes")
-    for note_id, note_content, timestamp, file_urls, audio_urls in get_notes(selected_class):
+    for note_id, note_content, timestamp, file_urls, audio_urls, note_title in get_notes(selected_class):
         col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
         with col1:
             date_only = timestamp.split()[0]
-            if st.button(f"{date_only}: {note_content[:50]}...", key=f"note_{note_id}"):
+            if st.button(f"{date_only}: {note_title} - {note_content[:50]}...", key=f"note_{note_id}"):
                 if st.session_state.current_note_id:
-                    update_note(st.session_state.current_note_id, note_content)
+                    print("Update note before switching")
+                    update_note(st.session_state.current_note_id, note_content, note_title)
                 st.session_state.current_note_id = note_id
-                st.session_state.current_note_content = get_note_by_id(note_id)
+                title, content = get_note_by_id(note_id)
+                st.session_state.current_note_title = title
+                st.session_state.current_note_content = content
                 st.rerun()
         with col2:
             if file_urls:
@@ -420,25 +469,8 @@ if selected_class:
                 if st.session_state.current_note_id == note_id:
                     st.session_state.current_note_id = None
                     st.session_state.current_note_content = ""
+                    st.session_state.current_note_title = ""
                 st.rerun()
-
-    # AI-TA chat
-    st.subheader("AI TA Chat :)")
-    if openai_api_key.startswith("sk-"):
-        chat_input = st.text_input("Ask AI-TA a question about this class:")
-        if st.button("Ask"):
-            c = st.session_state.db_conn.cursor()
-            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
-            serialized_index = c.fetchone()[0]
-            print("serialized_index fetched! ")
-            class_ta = AI_TA.deserialize(serialized_index)
-            print("class_ta deseralized ", class_ta.class_name)
-            openai.api_key = openai_api_key
-            response = class_ta.query(chat_input)
-            print("response generated ", response)
-            st.info(response)
-    else:
-        st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
 else:
     st.info("Please select a class from the sidebar or add a new one.")
 
