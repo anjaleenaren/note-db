@@ -402,7 +402,23 @@ if selected_class:
         chat_input = st.text_input("Ask AI-TA a question about this class:")
         if st.button("Ask"):
             model = ChatOpenAI(temperature=0.7, api_key=openai_api_key)
-            response = model.invoke(f"Question about {selected_class}: {chat_input}")
+            
+            # Get the current note content
+            current_note = st.session_state.current_note_content if st.session_state.current_note_id else ""
+            
+            # Prepare the prompt with the note content and the question
+            prompt = f"""
+            Class: {selected_class}
+            
+            Note content:
+            {current_note}
+            
+            Question: {chat_input}
+            
+            Please answer the question based on the information provided in the note and your general knowledge about the subject.
+            """
+            
+            response = model.invoke(prompt)
             st.info(response)
     else:
         st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
