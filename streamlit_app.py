@@ -4,6 +4,14 @@ import os
 from dotenv import load_dotenv
 import sqlite3
 import datetime
+import boto3
+from botocore.exceptions import NoCredentialsError
+import uuid
+import pytesseract
+from PIL import Image
+import io
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_bytes
 
 load_dotenv()
 
@@ -15,8 +23,17 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS classes
                  (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS notes
-                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME,
+                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_url TEXT,
                  FOREIGN KEY (class_id) REFERENCES classes(id))''')
+    
+    # Check if file_urls and audio_url columns exist, if not, add them
+    c.execute("PRAGMA table_info(notes)")
+    columns = [column[1] for column in c.fetchall()]
+    if 'file_urls' not in columns:
+        c.execute("ALTER TABLE notes ADD COLUMN file_urls TEXT")
+    if 'audio_url' not in columns:
+        c.execute("ALTER TABLE notes ADD COLUMN audio_url TEXT")
+    
     conn.commit()
     return conn
 
@@ -34,21 +51,120 @@ def get_classes():
     c.execute("SELECT name FROM classes")
     return [row[0] for row in c.fetchall()]
 
-def add_note(class_name, note_content):
+def extract_text_from_file(file):
+    text = ""
+    if file.type == "application/pdf":
+        pdf_reader = PdfReader(file)
+        for page_num, page in enumerate(pdf_reader.pages):
+            page_text = page.extract_text()
+            if page_text.strip():
+                text += page_text + "\n\n"
+            else:
+                # If no text was extracted, the page might be scanned. Use OCR.
+                file.seek(0)  # Reset file pointer to the beginning
+                images = convert_from_bytes(file.read(), first_page=page_num+1, last_page=page_num+1)
+                for image in images:
+                    text += pytesseract.image_to_string(image) + "\n\n"
+    else:
+        # Process as image
+        image = Image.open(file)
+        text = pytesseract.image_to_string(image)
+    return text.strip()
+
+def add_note(class_name, note_content, files=None, audio_file=None):
     c = st.session_state.db_conn.cursor()
     c.execute("SELECT id FROM classes WHERE name = ?", (class_name,))
     class_id = c.fetchone()[0]
-    c.execute("INSERT INTO notes (class_id, content, timestamp) VALUES (?, ?, ?)",
-              (class_id, note_content, datetime.datetime.now()))
+    
+    file_urls = []
+    audio_url = None
+    
+    if files:
+        for file in files:
+            # Extract text from the file
+            extracted_text = extract_text_from_file(file)
+            # Append extracted text to note_content
+            note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
+            
+            # Reset file pointer to beginning of file
+            file.seek(0)
+            
+            file_extension = os.path.splitext(file.name)[1]
+            file_filename = f"files/{uuid.uuid4()}{file_extension}"
+            if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
+                file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
+    
+    if audio_file:
+        audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
+        if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
+            audio_url = get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename)
+    
+    c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_url) 
+                 VALUES (?, ?, ?, ?, ?)""",
+              (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), audio_url))
+    st.session_state.db_conn.commit()
+
+def update_note(note_id, content, files=None, audio_file=None):
+    c = st.session_state.db_conn.cursor()
+    
+    file_urls = []
+    audio_url = None
+    
+    if files:
+        for file in files:
+            # Extract text from the file
+            extracted_text = extract_text_from_file(file)
+            # Append extracted text to content
+            content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
+            
+            # Reset file pointer to beginning of file
+            file.seek(0)
+            
+            file_extension = os.path.splitext(file.name)[1]
+            file_filename = f"files/{uuid.uuid4()}{file_extension}"
+            if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
+                file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
+    
+    if audio_file:
+        audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
+        if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
+            audio_url = get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename)
+    
+    # Get existing file_urls
+    c.execute("SELECT file_urls FROM notes WHERE id = ?", (note_id,))
+    existing_file_urls = c.fetchone()[0]
+    if existing_file_urls:
+        file_urls = existing_file_urls.split(',') + file_urls
+    
+    c.execute("""UPDATE notes 
+                 SET content = ?, timestamp = ?, file_urls = ?, audio_url = COALESCE(?, audio_url) 
+                 WHERE id = ?""",
+              (content, datetime.datetime.now(), ','.join(file_urls), audio_url, note_id))
+    st.session_state.db_conn.commit()
+
+def delete_file_from_note(note_id, file_url):
+    c = st.session_state.db_conn.cursor()
+    c.execute("SELECT file_urls FROM notes WHERE id = ?", (note_id,))
+    file_urls = c.fetchone()[0].split(',')
+    file_urls.remove(file_url)
+    c.execute("UPDATE notes SET file_urls = ? WHERE id = ?", (','.join(file_urls), note_id))
     st.session_state.db_conn.commit()
 
 def get_notes(class_name):
     c = st.session_state.db_conn.cursor()
-    c.execute("""SELECT notes.id, notes.content, notes.timestamp 
-                 FROM notes 
-                 JOIN classes ON notes.class_id = classes.id 
-                 WHERE classes.name = ?
-                 ORDER BY notes.timestamp DESC""", (class_name,))
+    try:
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp, notes.file_urls, notes.audio_url
+                     FROM notes 
+                     JOIN classes ON notes.class_id = classes.id 
+                     WHERE classes.name = ?
+                     ORDER BY notes.timestamp DESC""", (class_name,))
+    except sqlite3.OperationalError:
+        # If the query fails, fall back to the original schema
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp, NULL as file_urls, NULL as audio_url
+                     FROM notes 
+                     JOIN classes ON notes.class_id = classes.id 
+                     WHERE classes.name = ?
+                     ORDER BY notes.timestamp DESC""", (class_name,))
     return c.fetchall()
 
 def get_tables():
@@ -76,13 +192,6 @@ def clear_database():
     # c.execute("DELETE FROM sqlite_sequence WHERE name IN ('notes', 'classes')")  # Reset auto-increment
     st.session_state.db_conn.commit()
 
-# Add these new functions
-def update_note(note_id, content):
-    c = st.session_state.db_conn.cursor()
-    c.execute("UPDATE notes SET content = ?, timestamp = ? WHERE id = ?",
-              (content, datetime.datetime.now(), note_id))
-    st.session_state.db_conn.commit()
-
 def get_note_by_id(note_id):
     c = st.session_state.db_conn.cursor()
     c.execute("SELECT content FROM notes WHERE id = ?", (note_id,))
@@ -93,6 +202,25 @@ def delete_note(note_id):
     c = st.session_state.db_conn.cursor()
     c.execute("DELETE FROM notes WHERE id = ?", (note_id,))
     st.session_state.db_conn.commit()
+
+# Add these new functions for S3 operations
+def upload_to_s3(file, bucket_name, object_name):
+    pass
+    s3_client = boto3.client('s3',
+                             aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                             aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'))
+    try:
+        s3_client.upload_fileobj(file, bucket_name, object_name)
+        return True
+    except NoCredentialsError:
+        st.error("AWS credentials not available")
+        return False
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+        return False
+
+def get_s3_url(bucket_name, object_name):
+    return f"https://{bucket_name}.s3.amazonaws.com/{object_name}"
 
 # Streamlit UI
 st.title("🎓 Class Notes Manager")
@@ -151,13 +279,30 @@ if selected_class:
     # Text input for notes
     note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
     
+    # File upload for multiple images/PDFs
+    files = st.file_uploader("Upload images or PDFs (text extraction will be performed)", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True)
+    if files:
+        for i, file in enumerate(files):
+            if file.type == "application/pdf":
+                st.write(f"PDF uploaded: {file.name}")
+            else:
+                st.image(file, caption=f"Uploaded Image: {file.name}", width=200)
+            extracted_text = extract_text_from_file(file)
+            st.text_area(f"Extracted Text from {file.name}", value=extracted_text, height=150)
+            if st.button(f"Append Extracted Text to Note (File {i+1})", key=f"append_button_{i}"):
+                note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
+                st.session_state.current_note_content = note_content
+                st.experimental_rerun()
+    
+    audio_file = st.file_uploader("Upload an audio file", type=["mp3", "wav"])
+    
     # Save button for the current note
     if st.button("Save Note"):
         if st.session_state.current_note_id:
-            update_note(st.session_state.current_note_id, note_content)
+            update_note(st.session_state.current_note_id, note_content, files, audio_file)
             st.success("Note updated!")
         else:
-            add_note(selected_class, note_content)
+            add_note(selected_class, note_content, files, audio_file)
             st.success("New note added!")
         st.session_state.current_note_id = None
         st.session_state.current_note_content = ""
@@ -165,10 +310,10 @@ if selected_class:
     
     # Display existing notes
     st.subheader("Existing Notes")
-    for note_id, note_content, timestamp in get_notes(selected_class):
-        col1, col2, col3 = st.columns([3, 1, 1])
+    for note_id, note_content, timestamp, file_urls, audio_url in get_notes(selected_class):
+        col1, col2, col3 = st.columns([3, 2, 1])
         with col1:
-            date_only = timestamp.split()[0]  # Extract only the date part
+            date_only = timestamp.split()[0]
             if st.button(f"{date_only}: {note_content[:50]}...", key=f"note_{note_id}"):
                 if st.session_state.current_note_id:
                     update_note(st.session_state.current_note_id, note_content)
@@ -176,14 +321,24 @@ if selected_class:
                 st.session_state.current_note_content = get_note_by_id(note_id)
                 st.experimental_rerun()
         with col2:
-            if st.button("Delete", key=f"delete_{note_id}"):
+            if file_urls:
+                for file_url in file_urls.split(','):
+                    if file_url.endswith(".pdf"):
+                        st.write("PDF")
+                    else:
+                        st.image(file_url, width=100)
+                    if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
+                        delete_file_from_note(note_id, file_url)
+                        st.experimental_rerun()
+        with col3:
+            if audio_url:
+                st.audio(audio_url)
+            if st.button("Delete Note", key=f"delete_note_{note_id}"):
                 delete_note(note_id)
                 if st.session_state.current_note_id == note_id:
                     st.session_state.current_note_id = None
                     st.session_state.current_note_content = ""
                 st.experimental_rerun()
-        with col3:
-            st.write("")  # Empty column for spacing
 
     # AI-TA chat
     st.subheader("AI TA Chat :)")
