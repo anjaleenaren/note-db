@@ -17,6 +17,7 @@ import re
 import whisper
 import tempfile
 from functools import lru_cache
+from ai_ta import AI_TA
 
 load_dotenv()
 
@@ -26,7 +27,15 @@ def init_db():
     conn = sqlite3.connect('class_notes.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS classes
-                 (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
+                 (id INTEGER PRIMARY KEY, 
+                  name TEXT UNIQUE)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS ta_indexes
+                 (id INTEGER PRIMARY KEY, 
+                  class_name TEXT UNIQUE,
+                  serialized_index TEXT UNIQUE,
+                  FOREIGN KEY (class_name) REFERENCES classes(name))''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS notes
                  (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT,
                  FOREIGN KEY (class_id) REFERENCES classes(id))''')
@@ -49,6 +58,10 @@ if 'db_conn' not in st.session_state:
 def add_class(class_name):
     c = st.session_state.db_conn.cursor()
     c.execute("INSERT OR IGNORE INTO classes (name) VALUES (?)", (class_name,))
+
+    class_ta = AI_TA(class_name)
+    c.execute("INSERT OR IGNORE INTO ta_indexes (class_name, serialized_index) VALUES (?, ?)", 
+                (class_name, class_ta.serialize()))
     st.session_state.db_conn.commit()
 
 def get_classes():
@@ -113,6 +126,15 @@ def add_note(class_name, note_content, files=None, audio_files=None):
     c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_urls) 
                  VALUES (?, ?, ?, ?, ?)""",
               (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
+    
+    # Update the TA index
+    c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
+    serialized_index = c.fetchone()[0]
+    class_ta = AI_TA.deserialize(serialized_index)
+    print("class_ta.class_name: ", class_ta.class_name)
+    print("class_ta.history: ", class_ta.train_history)
+    class_ta.train(note_content)
+    c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
     st.session_state.db_conn.commit()
 
 def update_note(note_id, content, files=None, audio_files=None):
@@ -157,7 +179,6 @@ def delete_file_from_note(note_id, file_url):
     file_urls = c.fetchone()[0].split(',')
     file_urls.remove(file_url)
     c.execute("UPDATE notes SET file_urls = ? WHERE id = ?", (','.join(file_urls), note_id))
-    st.session_state.db_conn.commit()
 
 def get_notes(class_name):
     c = st.session_state.db_conn.cursor()
@@ -199,6 +220,14 @@ def clear_database():
     c.execute("DELETE FROM notes")
     c.execute("DELETE FROM classes")
     # c.execute("DELETE FROM sqlite_sequence WHERE name IN ('notes', 'classes')")  # Reset auto-increment
+    st.session_state.db_conn.commit()
+
+
+# Add these new functions
+def update_note(note_id, content, title, type="text"):
+    c = st.session_state.db_conn.cursor()
+    c.execute("UPDATE notes SET content = ?, timestamp = ? WHERE id = ?",
+              (content, datetime.datetime.now(), note_id))
     st.session_state.db_conn.commit()
 
 def get_note_by_id(note_id):
@@ -297,7 +326,9 @@ if selected_class:
     if 'current_note_content' not in st.session_state:
         st.session_state.current_note_content = ""
 
+
     # Text input for notes
+    note_title = st.text_input("Note Title:")
     note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
     
     # File upload for multiple images/PDFs/PPTs
@@ -401,8 +432,14 @@ if selected_class:
     if openai_api_key.startswith("sk-"):
         chat_input = st.text_input("Ask AI-TA a question about this class:")
         if st.button("Ask"):
-            model = ChatOpenAI(temperature=0.7, api_key=openai_api_key)
-            response = model.invoke(f"Question about {selected_class}: {chat_input}")
+            c = st.session_state.db_conn.cursor()
+            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
+            serialized_index = c.fetchone()[0]
+            class_ta = AI_TA.deserialize(serialized_index)
+            print("class_ta.class_name: ", class_ta.class_name)
+            print("class_ta.history: ", class_ta.train_history) 
+            class_ta.set_openai_api_key(openai_api_key)
+            response = class_ta.query(chat_input)
             st.info(response)
     else:
         st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
