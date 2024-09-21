@@ -12,6 +12,8 @@ from PIL import Image
 import io
 from PyPDF2 import PdfReader
 from pdf2image import convert_from_bytes
+from pptx import Presentation
+import re
 
 load_dotenv()
 
@@ -58,17 +60,27 @@ def extract_text_from_file(file):
         for page_num, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text()
             if page_text.strip():
-                text += page_text + "\n\n"
+                text += page_text + "\n"
             else:
                 # If no text was extracted, the page might be scanned. Use OCR.
                 file.seek(0)  # Reset file pointer to the beginning
                 images = convert_from_bytes(file.read(), first_page=page_num+1, last_page=page_num+1)
                 for image in images:
-                    text += pytesseract.image_to_string(image) + "\n\n"
+                    text += pytesseract.image_to_string(image) + "\n"
+    elif file.type in ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.ms-powerpoint"]:
+        prs = Presentation(io.BytesIO(file.read()))
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, 'text'):
+                    text += shape.text + "\n"
+            text += "\n"
     else:
         # Process as image
         image = Image.open(file)
         text = pytesseract.image_to_string(image)
+    
+    # Strip multiple consecutive new lines to be one new line at most
+    text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
 
 def add_note(class_name, note_content, files=None, audio_file=None):
@@ -79,25 +91,28 @@ def add_note(class_name, note_content, files=None, audio_file=None):
     file_urls = []
     audio_url = None
     
-    if files:
-        for file in files:
-            # Extract text from the file
-            extracted_text = extract_text_from_file(file)
-            # Append extracted text to note_content
-            note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
+    # if files:
+    #     for file in files:
+    #         # Extract text from the file
+    #         extracted_text = extract_text_from_file(file)
+    #         # Append extracted text to note_content
+    #         note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
             
-            # Reset file pointer to beginning of file
-            file.seek(0)
+    #         # Reset file pointer to beginning of file
+    #         file.seek(0)
             
-            file_extension = os.path.splitext(file.name)[1]
-            file_filename = f"files/{uuid.uuid4()}{file_extension}"
-            if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
-                file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
+    #         file_extension = os.path.splitext(file.name)[1]
+    #         file_filename = f"files/{uuid.uuid4()}{file_extension}"
+    #         if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
+    #             file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
     
     if audio_file:
         audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
         if upload_to_s3(audio_file, os.getenv('S3_BUCKET_NAME'), audio_filename):
             audio_url = get_s3_url(os.getenv('S3_BUCKET_NAME'), audio_filename)
+    
+    # Strip multiple consecutive new lines in note_content
+    note_content = re.sub(r'\n{2,}', '\n', note_content)
     
     c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_url) 
                  VALUES (?, ?, ?, ?, ?)""",
@@ -110,20 +125,20 @@ def update_note(note_id, content, files=None, audio_file=None):
     file_urls = []
     audio_url = None
     
-    if files:
-        for file in files:
-            # Extract text from the file
-            extracted_text = extract_text_from_file(file)
-            # Append extracted text to content
-            content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
+    # if files:
+    #     for file in files:
+    #         # Extract text from the file
+    #         extracted_text = extract_text_from_file(file)
+    #         # Append extracted text to content
+    #         content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
             
-            # Reset file pointer to beginning of file
-            file.seek(0)
+    #         # Reset file pointer to beginning of file
+    #         file.seek(0)
             
-            file_extension = os.path.splitext(file.name)[1]
-            file_filename = f"files/{uuid.uuid4()}{file_extension}"
-            if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
-                file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
+    #         file_extension = os.path.splitext(file.name)[1]
+    #         file_filename = f"files/{uuid.uuid4()}{file_extension}"
+    #         if upload_to_s3(file, os.getenv('S3_BUCKET_NAME'), file_filename):
+    #             file_urls.append(get_s3_url(os.getenv('S3_BUCKET_NAME'), file_filename))
     
     if audio_file:
         audio_filename = f"audio/{uuid.uuid4()}{os.path.splitext(audio_file.name)[1]}"
@@ -135,6 +150,9 @@ def update_note(note_id, content, files=None, audio_file=None):
     existing_file_urls = c.fetchone()[0]
     if existing_file_urls:
         file_urls = existing_file_urls.split(',') + file_urls
+    
+    # Strip multiple consecutive new lines in content
+    content = re.sub(r'\n{2,}', '\n', content)
     
     c.execute("""UPDATE notes 
                  SET content = ?, timestamp = ?, file_urls = ?, audio_url = COALESCE(?, audio_url) 
@@ -279,12 +297,16 @@ if selected_class:
     # Text input for notes
     note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
     
-    # File upload for multiple images/PDFs
-    files = st.file_uploader("Upload images or PDFs (text extraction will be performed)", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True)
+    # File upload for multiple images/PDFs/PPTs
+    files = st.file_uploader("Upload images, PDFs, or PowerPoint files (text extraction will be performed)", 
+                             type=["png", "jpg", "jpeg", "pdf", "ppt", "pptx"], 
+                             accept_multiple_files=True)
     if files:
         for i, file in enumerate(files):
             if file.type == "application/pdf":
                 st.write(f"PDF uploaded: {file.name}")
+            elif file.type in ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.ms-powerpoint"]:
+                st.write(f"PowerPoint uploaded: {file.name}")
             else:
                 st.image(file, caption=f"Uploaded Image: {file.name}", width=200)
             extracted_text = extract_text_from_file(file)
@@ -325,6 +347,8 @@ if selected_class:
                 for file_url in file_urls.split(','):
                     if file_url.endswith(".pdf"):
                         st.write("PDF")
+                    elif file_url.endswith((".ppt", ".pptx")):
+                        st.write("PowerPoint")
                     else:
                         st.image(file_url, width=100)
                     if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
