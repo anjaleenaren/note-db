@@ -29,7 +29,6 @@ class AI_TA:
         self.query_engine = self.index.as_query_engine()
         response = self.query_engine.query(query)
         print(f"Receive Query: {query}")
-        print(f"Response Generated: {response}")
         return response
 
     def get_history(self):

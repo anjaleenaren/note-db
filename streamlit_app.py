@@ -435,11 +435,12 @@ if selected_class:
             c = st.session_state.db_conn.cursor()
             c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
             serialized_index = c.fetchone()[0]
+            print("serialized_index fetched! ")
             class_ta = AI_TA.deserialize(serialized_index)
-            print("class_ta.class_name: ", class_ta.class_name)
-            print("class_ta.history: ", class_ta.train_history) 
+            print("class_ta deseralized ", class_ta.class_name)
             openai.api_key = openai_api_key
             response = class_ta.query(chat_input)
+            print("response generated ", response)
             st.info(response)
     else:
         st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
