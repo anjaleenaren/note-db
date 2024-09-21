@@ -8,3 +8,4 @@ PyPDF2
 pdf2image
 python-pptx
 openai-whisper
+llama-index

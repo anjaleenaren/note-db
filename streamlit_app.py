@@ -17,6 +17,9 @@ import re
 import whisper
 import tempfile
 from functools import lru_cache
+from llama_index import VectorStoreIndex, SimpleDirectoryReader, Document
+from llama_index.storage.storage_context import StorageContext
+from llama_index.vector_stores import SimpleVectorStore
 
 load_dotenv()
 
@@ -114,6 +117,7 @@ def add_note(class_name, note_content, files=None, audio_files=None):
                  VALUES (?, ?, ?, ?, ?)""",
               (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
     st.session_state.db_conn.commit()
+    update_class_index(class_name)
 
 def update_note(note_id, content, files=None, audio_files=None):
     c = st.session_state.db_conn.cursor()
@@ -150,6 +154,15 @@ def update_note(note_id, content, files=None, audio_files=None):
                  WHERE id = ?""",
               (content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls), note_id))
     st.session_state.db_conn.commit()
+    
+    # Get the class name for this note
+    c = st.session_state.db_conn.cursor()
+    c.execute("""SELECT classes.name
+                 FROM notes 
+                 JOIN classes ON notes.class_id = classes.id 
+                 WHERE notes.id = ?""", (note_id,))
+    class_name = c.fetchone()[0]
+    update_class_index(class_name)
 
 def delete_file_from_note(note_id, file_url):
     c = st.session_state.db_conn.cursor()
@@ -242,6 +255,37 @@ def cached_transcribe_audio(file_content):
     result = model.transcribe(tmp_file_path)
     os.unlink(tmp_file_path)
     return result["text"]
+
+# Add this function to create or update the index for a class
+def update_class_index(class_name):
+    c = st.session_state.db_conn.cursor()
+    c.execute("""SELECT notes.content
+                 FROM notes 
+                 JOIN classes ON notes.class_id = classes.id 
+                 WHERE classes.name = ?""", (class_name,))
+    notes = c.fetchall()
+    
+    documents = [Document(text=note[0], metadata={'class': class_name}) for note in notes]
+    
+    storage_context = StorageContext.from_defaults(vector_store=SimpleVectorStore())
+    index = VectorStoreIndex.from_documents(documents, storage_context=storage_context)
+    
+    # Save the index
+    if not os.path.exists('indexes'):
+        os.makedirs('indexes')
+    index.storage_context.persist(persist_dir=f"indexes/{class_name}")
+
+# Add this function to query the index
+def query_class_index(class_name, query):
+    if not os.path.exists(f"indexes/{class_name}"):
+        return "No index found for this class. Please add some notes first."
+    
+    storage_context = StorageContext.from_defaults(persist_dir=f"indexes/{class_name}")
+    index = VectorStoreIndex.from_storage(storage_context)
+    
+    query_engine = index.as_query_engine()
+    response = query_engine.query(query)
+    return response.response
 
 # Streamlit UI
 st.title("🎓 Class Notes Manager")
@@ -401,25 +445,29 @@ if selected_class:
     if openai_api_key.startswith("sk-"):
         chat_input = st.text_input("Ask AI-TA a question about this class:")
         if st.button("Ask"):
-            model = ChatOpenAI(temperature=0.7, api_key=openai_api_key)
+            # Use LlamaIndex to query the class index
+            response = query_class_index(selected_class, chat_input)
+            st.info(response)
             
-            # Get the current note content
+            # If you want to use both LlamaIndex and the current note, you can combine them:
+            model = ChatOpenAI(temperature=0.7, api_key=openai_api_key)
             current_note = st.session_state.current_note_content if st.session_state.current_note_id else ""
             
-            # Prepare the prompt with the note content and the question
             prompt = f"""
             Class: {selected_class}
             
-            Note content:
+            LlamaIndex response: {response}
+            
+            Current note content:
             {current_note}
             
             Question: {chat_input}
             
-            Please answer the question based on the information provided in the note and your general knowledge about the subject.
+            Please provide a comprehensive answer based on the LlamaIndex response, the current note content (if any), and your general knowledge about the subject.
             """
             
-            response = model.invoke(prompt)
-            st.info(response)
+            final_response = model.invoke(prompt)
+            st.info(final_response)
     else:
         st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
 else:
