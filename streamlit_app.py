@@ -224,11 +224,6 @@ def clear_database():
 
 
 # Add these new functions
-def update_note(note_id, content, title, type="text"):
-    c = st.session_state.db_conn.cursor()
-    c.execute("UPDATE notes SET content = ?, timestamp = ? WHERE id = ?",
-              (content, datetime.datetime.now(), note_id))
-    st.session_state.db_conn.commit()
 
 def get_note_by_id(note_id):
     c = st.session_state.db_conn.cursor()
@@ -306,7 +301,7 @@ if st.sidebar.button("Add Class"):
     if new_class:
         add_class(new_class)
         st.sidebar.success(f"Added {new_class}")
-        st.experimental_rerun()
+        st.rerun()
 
 # Display existing classes
 st.sidebar.subheader("Existing Classes")
@@ -348,7 +343,7 @@ if selected_class:
             if st.button(f"Append Extracted Text to Note (File {i+1})", key=f"append_button_{i}"):
                 note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
                 st.session_state.current_note_content = note_content
-                st.experimental_rerun()
+                st.rerun()
     
     # Audio file upload
     audio_files = st.file_uploader("Upload audio files (transcription will be performed)", 
@@ -374,7 +369,7 @@ if selected_class:
             if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
                 note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
                 st.session_state.current_note_content = note_content
-                st.experimental_rerun()
+                st.rerun()
     
     # Save button for the current note
     if st.button("Save Note"):
@@ -386,7 +381,7 @@ if selected_class:
             st.success("New note added!")
         st.session_state.current_note_id = None
         st.session_state.current_note_content = ""
-        st.experimental_rerun()
+        st.rerun()
     
     # Display existing notes
     st.subheader("Existing Notes")
@@ -399,7 +394,7 @@ if selected_class:
                     update_note(st.session_state.current_note_id, note_content)
                 st.session_state.current_note_id = note_id
                 st.session_state.current_note_content = get_note_by_id(note_id)
-                st.experimental_rerun()
+                st.rerun()
         with col2:
             if file_urls:
                 for file_url in file_urls.split(','):
@@ -411,21 +406,21 @@ if selected_class:
                         st.image(file_url, width=100)
                     if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
                         delete_file_from_note(note_id, file_url)
-                        st.experimental_rerun()
+                        st.rerun()
         with col3:
             if audio_urls:
                 for audio_url in audio_urls.split(','):
                     st.audio(audio_url)
                     if st.button("Delete Audio", key=f"delete_audio_{note_id}_{audio_url}"):
                         delete_file_from_note(note_id, audio_url)
-                        st.experimental_rerun()
+                        st.rerun()
         with col4:
             if st.button("Delete Note", key=f"delete_note_{note_id}"):
                 delete_note(note_id)
                 if st.session_state.current_note_id == note_id:
                     st.session_state.current_note_id = None
                     st.session_state.current_note_content = ""
-                st.experimental_rerun()
+                st.rerun()
 
     # AI-TA chat
     st.subheader("AI TA Chat :)")
