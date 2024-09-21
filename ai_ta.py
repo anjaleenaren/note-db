@@ -9,10 +9,6 @@ class AI_TA:
     @classmethod
     def deserialize(cls, serialized):
         return pickle.loads(serialized)
-    
-    @classmethod
-    def set_openai_api_key(cls, api_key):
-        openai.api_key = api_key
 
     def __init__(self, class_name):
         self.class_name = class_name

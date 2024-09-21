@@ -18,7 +18,7 @@ import whisper
 import tempfile
 from functools import lru_cache
 from ai_ta import AI_TA
-
+import openai
 load_dotenv()
 
 # Database setup
@@ -438,7 +438,7 @@ if selected_class:
             class_ta = AI_TA.deserialize(serialized_index)
             print("class_ta.class_name: ", class_ta.class_name)
             print("class_ta.history: ", class_ta.train_history) 
-            class_ta.set_openai_api_key(openai_api_key)
+            openai.api_key = openai_api_key
             response = class_ta.query(chat_input)
             st.info(response)
     else:
