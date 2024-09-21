@@ -17,7 +17,8 @@ import re
 import whisper
 import tempfile
 from functools import lru_cache
-
+from ai_ta import AI_TA
+import openai
 load_dotenv()
 
 # Database setup
@@ -26,7 +27,15 @@ def init_db():
     conn = sqlite3.connect('class_notes.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS classes
-                 (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
+                 (id INTEGER PRIMARY KEY, 
+                  name TEXT UNIQUE)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS ta_indexes
+                 (id INTEGER PRIMARY KEY, 
+                  class_name TEXT UNIQUE,
+                  serialized_index TEXT UNIQUE,
+                  FOREIGN KEY (class_name) REFERENCES classes(name))''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS notes
                  (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT,
                  FOREIGN KEY (class_id) REFERENCES classes(id))''')
@@ -49,6 +58,10 @@ if 'db_conn' not in st.session_state:
 def add_class(class_name):
     c = st.session_state.db_conn.cursor()
     c.execute("INSERT OR IGNORE INTO classes (name) VALUES (?)", (class_name,))
+
+    class_ta = AI_TA(class_name)
+    c.execute("INSERT OR IGNORE INTO ta_indexes (class_name, serialized_index) VALUES (?, ?)", 
+                (class_name, class_ta.serialize()))
     st.session_state.db_conn.commit()
 
 def get_classes():
@@ -113,6 +126,15 @@ def add_note(class_name, note_content, files=None, audio_files=None):
     c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_urls) 
                  VALUES (?, ?, ?, ?, ?)""",
               (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
+    
+    # Update the TA index
+    c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
+    serialized_index = c.fetchone()[0]
+    class_ta = AI_TA.deserialize(serialized_index)
+    print("class_ta.class_name: ", class_ta.class_name)
+    print("class_ta.history: ", class_ta.train_history)
+    class_ta.train(note_content)
+    c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
     st.session_state.db_conn.commit()
 
 def update_note(note_id, content, files=None, audio_files=None):
@@ -157,7 +179,6 @@ def delete_file_from_note(note_id, file_url):
     file_urls = c.fetchone()[0].split(',')
     file_urls.remove(file_url)
     c.execute("UPDATE notes SET file_urls = ? WHERE id = ?", (','.join(file_urls), note_id))
-    st.session_state.db_conn.commit()
 
 def get_notes(class_name):
     c = st.session_state.db_conn.cursor()
@@ -200,6 +221,9 @@ def clear_database():
     c.execute("DELETE FROM classes")
     # c.execute("DELETE FROM sqlite_sequence WHERE name IN ('notes', 'classes')")  # Reset auto-increment
     st.session_state.db_conn.commit()
+
+
+# Add these new functions
 
 def get_note_by_id(note_id):
     c = st.session_state.db_conn.cursor()
@@ -277,7 +301,7 @@ if st.sidebar.button("Add Class"):
     if new_class:
         add_class(new_class)
         st.sidebar.success(f"Added {new_class}")
-        st.experimental_rerun()
+        st.rerun()
 
 # Display existing classes
 st.sidebar.subheader("Existing Classes")
@@ -297,7 +321,9 @@ if selected_class:
     if 'current_note_content' not in st.session_state:
         st.session_state.current_note_content = ""
 
+
     # Text input for notes
+    note_title = st.text_input("Note Title:")
     note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
     
     # File upload for multiple images/PDFs/PPTs
@@ -317,7 +343,7 @@ if selected_class:
             if st.button(f"Append Extracted Text to Note (File {i+1})", key=f"append_button_{i}"):
                 note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
                 st.session_state.current_note_content = note_content
-                st.experimental_rerun()
+                st.rerun()
     
     # Audio file upload
     audio_files = st.file_uploader("Upload audio files (transcription will be performed)", 
@@ -343,7 +369,7 @@ if selected_class:
             if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
                 note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
                 st.session_state.current_note_content = note_content
-                st.experimental_rerun()
+                st.rerun()
     
     # Save button for the current note
     if st.button("Save Note"):
@@ -355,7 +381,7 @@ if selected_class:
             st.success("New note added!")
         st.session_state.current_note_id = None
         st.session_state.current_note_content = ""
-        st.experimental_rerun()
+        st.rerun()
     
     # Display existing notes
     st.subheader("Existing Notes")
@@ -368,7 +394,7 @@ if selected_class:
                     update_note(st.session_state.current_note_id, note_content)
                 st.session_state.current_note_id = note_id
                 st.session_state.current_note_content = get_note_by_id(note_id)
-                st.experimental_rerun()
+                st.rerun()
         with col2:
             if file_urls:
                 for file_url in file_urls.split(','):
@@ -380,45 +406,36 @@ if selected_class:
                         st.image(file_url, width=100)
                     if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
                         delete_file_from_note(note_id, file_url)
-                        st.experimental_rerun()
+                        st.rerun()
         with col3:
             if audio_urls:
                 for audio_url in audio_urls.split(','):
                     st.audio(audio_url)
                     if st.button("Delete Audio", key=f"delete_audio_{note_id}_{audio_url}"):
                         delete_file_from_note(note_id, audio_url)
-                        st.experimental_rerun()
+                        st.rerun()
         with col4:
             if st.button("Delete Note", key=f"delete_note_{note_id}"):
                 delete_note(note_id)
                 if st.session_state.current_note_id == note_id:
                     st.session_state.current_note_id = None
                     st.session_state.current_note_content = ""
-                st.experimental_rerun()
+                st.rerun()
 
     # AI-TA chat
     st.subheader("AI TA Chat :)")
     if openai_api_key.startswith("sk-"):
         chat_input = st.text_input("Ask AI-TA a question about this class:")
         if st.button("Ask"):
-            model = ChatOpenAI(temperature=0.7, api_key=openai_api_key)
-            
-            # Get the current note content
-            current_note = st.session_state.current_note_content if st.session_state.current_note_id else ""
-            
-            # Prepare the prompt with the note content and the question
-            prompt = f"""
-            Class: {selected_class}
-            
-            Note content:
-            {current_note}
-            
-            Question: {chat_input}
-            
-            Please answer the question based on the information provided in the note and your general knowledge about the subject.
-            """
-            
-            response = model.invoke(prompt)
+            c = st.session_state.db_conn.cursor()
+            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
+            serialized_index = c.fetchone()[0]
+            print("serialized_index fetched! ")
+            class_ta = AI_TA.deserialize(serialized_index)
+            print("class_ta deseralized ", class_ta.class_name)
+            openai.api_key = openai_api_key
+            response = class_ta.query(chat_input)
+            print("response generated ", response)
             st.info(response)
     else:
         st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
