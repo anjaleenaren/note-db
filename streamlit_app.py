@@ -277,23 +277,28 @@ st.title("🎓 Class Notes Manager")
 #     st.experimental_rerun()
 
 # Add this new button
-if st.button("Show Database Tables"):
-    tables = get_tables()
-    st.write("Tables in the database:", tables)
+# if st.button("Show Database Tables"):
+#     tables = get_tables()
+#     st.write("Tables in the database:", tables)
 
-# Add these new buttons
-if st.button("Show Classes Data"):
-    classes_data = get_classes_data()
-    st.write("Classes table contents:")
-    st.table(classes_data)
+# # Add these new buttons
+# if st.button("Show Classes Data"):
+#     classes_data = get_classes_data()
+#     st.write("Classes table contents:")
+#     st.table(classes_data)
 
-if st.button("Show Notes Data"):
-    notes_data = get_notes_data()
-    st.write("Notes table contents:")
-    st.table(notes_data)
+# if st.button("Show Notes Data"):
+#     notes_data = get_notes_data()
+#     st.write("Notes table contents:")
+#     st.table(notes_data)
 
 # Sidebar for class management
 st.sidebar.title("Class Management")
+
+# Display existing classes
+st.sidebar.subheader("Existing Classes")
+classes = get_classes()
+selected_class = st.sidebar.selectbox("Select a class:", [""] + classes)
 
 # Add new class
 new_class = st.sidebar.text_input("Add a new class:")
@@ -302,17 +307,27 @@ if st.sidebar.button("Add Class"):
         add_class(new_class)
         st.sidebar.success(f"Added {new_class}")
         st.rerun()
-
-# Display existing classes
-st.sidebar.subheader("Existing Classes")
-classes = get_classes()
-selected_class = st.sidebar.selectbox("Select a class:", [""] + classes)
-
 # OpenAI API Key input
 openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
 
 # Main content area
 if selected_class:
+     # AI-TA chat
+    st.subheader("AI TA Chat :)")
+    if openai_api_key.startswith("sk-"):
+        chat_input = st.text_input("Ask AI-TA a question about this class:")
+        if st.button("Ask"):
+            c = st.session_state.db_conn.cursor()
+            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
+            serialized_index = c.fetchone()[0]
+            print("serialized_index fetched! ")
+            class_ta = AI_TA.deserialize(serialized_index)
+            print("class_ta deseralized ", class_ta.class_name)
+            openai.api_key = openai_api_key
+            response = class_ta.query(chat_input)
+            print("response generated ", response)
+            st.info(response)
+
     st.subheader(f"Notes for {selected_class}")
     
     # Initialize session state for current note
@@ -422,21 +437,6 @@ if selected_class:
                     st.session_state.current_note_content = ""
                 st.rerun()
 
-    # AI-TA chat
-    st.subheader("AI TA Chat :)")
-    if openai_api_key.startswith("sk-"):
-        chat_input = st.text_input("Ask AI-TA a question about this class:")
-        if st.button("Ask"):
-            c = st.session_state.db_conn.cursor()
-            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
-            serialized_index = c.fetchone()[0]
-            print("serialized_index fetched! ")
-            class_ta = AI_TA.deserialize(serialized_index)
-            print("class_ta deseralized ", class_ta.class_name)
-            openai.api_key = openai_api_key
-            response = class_ta.query(chat_input)
-            print("response generated ", response)
-            st.info(response)
     else:
         st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
 else:
