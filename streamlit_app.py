@@ -22,6 +22,9 @@ import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
 import openai
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
+# from llama_index.core.multi_modal_llms import OpenAIMultiModal
+
 load_dotenv()
 
 # Database setup
@@ -102,6 +105,18 @@ def extract_text_from_file(file):
     text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
 
+def process_files(files):
+    documents = []
+    for file in files:
+        if file.type.startswith('image/'):
+            img_data = file.read()
+            documents.append(Document(image=img_data))
+        elif file.type == 'application/pdf':
+            pdf_reader = SimpleDirectoryReader().load_data(file)
+            documents.extend(pdf_reader)
+        # Add more file type handlers as needed
+    return documents
+
 def add_note(class_name, note_content, files=None, audio_files=None):
     c = st.session_state.db_conn.cursor()
     c.execute("SELECT id FROM classes WHERE name = ?", (class_name,))
@@ -136,7 +151,7 @@ def add_note(class_name, note_content, files=None, audio_files=None):
     class_ta = AI_TA.deserialize(serialized_index)
     print("class_ta.class_name: ", class_ta.class_name)
     print("class_ta.history: ", class_ta.train_history)
-    class_ta.train(note_content)
+    class_ta.train(note_content, files)
     c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
     st.session_state.db_conn.commit()
 
@@ -423,110 +438,41 @@ if authentication_status:
             st.session_state.current_note_content = ""
             st.rerun()
         
-        # # Display existing notes
-        # st.subheader("Existing Notes")
-        # for note_id, note_content, timestamp, file_urls, audio_urls in get_notes(selected_class):
-        #     col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
-        #     with col1:
-        #         date_only = timestamp.split()[0]
-        #         if st.button(f"{date_only}: {note_content[:50]}...", key=f"note_{note_id}"):
-        #             if st.session_state.current_note_id:
-        #                 update_note(st.session_state.current_note_id, note_content)
-        #             st.session_state.current_note_id = note_id
-        #             st.session_state.current_note_content = get_note_by_id(note_id)
-        #             st.rerun()
-        #     with col2:
-        #         if file_urls:
-        #             for file_url in file_urls.split(','):
-        #                 if file_url.endswith(".pdf"):
-        #                     st.write("PDF")
-        #                 elif file_url.endswith((".ppt", ".pptx")):
-        #                     st.write("PowerPoint")
-        #                 else:
-        #                     st.image(file_url, width=100)
-        #                 if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
-        #                     delete_file_from_note(note_id, file_url)
-        #                     st.rerun()
-        #     with col3:
-        #         if audio_urls:
-        #             for audio_url in audio_urls.split(','):
-        #                 st.audio(audio_url)
-        #                 if st.button("Delete Audio", key=f"delete_audio_{note_id}_{audio_url}"):
-        #                     delete_file_from_note(note_id, audio_url)
-        #                     st.rerun()
-        #     with col4:
-        #         if st.button("Delete Note", key=f"delete_note_{note_id}"):
-        #             delete_note(note_id)
-        #             if st.session_state.current_note_id == note_id:
-        #                 st.session_state.current_note_id = None
-        #                 st.session_state.current_note_content = ""
-        #             st.rerun()
+        # Display existing notes
+        st.subheader("Existing Notes")
 
-    # if audio_files:
-    #     for i, audio_file in enumerate(audio_files):
-    #         st.audio(audio_file)
-            
-    #         # Check if transcription is already done
-    #         if audio_file.name not in st.session_state.transcribed_texts:
-    #             with st.spinner(f"Transcribing {audio_file.name}..."):
-    #                 transcribed_text = cached_transcribe_audio(audio_file.read())
-    #             st.session_state.transcribed_texts[audio_file.name] = transcribed_text
-    #         else:
-    #             transcribed_text = st.session_state.transcribed_texts[audio_file.name]
-            
-    #         st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
-    #         if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
-    #             note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
-    #             st.session_state.current_note_content = note_content
-    #             st.rerun()
-    
-    # # Save button for the current note
-    # if st.button("Save Note"):
-    #     if st.session_state.current_note_id:
-    #         update_note(st.session_state.current_note_id, note_content, files, audio_files)
-    #         st.success("Note updated!")
-    #     else:
-    #         add_note(selected_class, note_content, files, audio_files)
-    #         st.success("New note added!")
-    #     st.session_state.current_note_id = None
-    #     st.session_state.current_note_content = ""
-    #     st.rerun()
-    
-    # Display existing notes
-    st.subheader("Existing Notes")
-
-    c = st.session_state.db_conn.cursor()
-    c.execute("""SELECT notes.id, notes.content
+        c = st.session_state.db_conn.cursor()
+        c.execute("""SELECT notes.id, notes.content
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
                      ORDER BY notes.timestamp DESC""", (selected_class,))
-    notes_data = c.fetchall()
-    
-    for note_id, note_content in notes_data:
-        container = st.container(border=True)
-        col1, col2, col3, col4, col5= container.columns(5, vertical_alignment="center")
-        with col1:
-            col1.markdown(f"### Note {note_id}")
-        with col4:
-            if st.button("Edit Note", key=f"edit_note_{note_id}"):
-                if st.session_state.current_note_id:
-                    update_note(st.session_state.current_note_id, note_content)
-                st.session_state.current_note_id = note_id
-                st.session_state.current_note_content = get_note_by_id(note_id)
-                st.rerun()
-        with col5:
-            if st.button("Delete Note", key=f"delete_note_{note_id}"):
-                delete_note(note_id)
-                if st.session_state.current_note_id == note_id:
-                    st.session_state.current_note_id = None
-                    st.session_state.current_note_content = ""
-                st.rerun()
-        container.write(f"{note_content[:300]}...")
-        image_number = note_id % 2 +1
-        container.image(f"user_profiles/{image_number}.jpg")
-       
+        notes_data = c.fetchall()
         
+        for note_id, note_content in notes_data:
+            container = st.container(border=True)
+            col1, col2, col3, col4, col5= container.columns(5, vertical_alignment="center")
+            with col1:
+                col1.markdown(f"### Note {note_id}")
+            with col4:
+                if st.button("Edit Note", key=f"edit_note_{note_id}"):
+                    if st.session_state.current_note_id:
+                        update_note(st.session_state.current_note_id, note_content)
+                    st.session_state.current_note_id = note_id
+                    st.session_state.current_note_content = get_note_by_id(note_id)
+                    st.rerun()
+            with col5:
+                if st.button("Delete Note", key=f"delete_note_{note_id}"):
+                    delete_note(note_id)
+                    if st.session_state.current_note_id == note_id:
+                        st.session_state.current_note_id = None
+                        st.session_state.current_note_content = ""
+                    st.rerun()
+            container.write(f"{note_content[:300]}...")
+            image_number = note_id % 2 +1
+            container.image(f"user_profiles/{image_number}.jpg")
+           
+            
 
     # else:
     #     st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
