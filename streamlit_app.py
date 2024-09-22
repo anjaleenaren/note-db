@@ -136,16 +136,18 @@ def add_note(class_name, note_content, note_title, files=None, audio_files=None)
  
     return new_note_id  # Return the id of the newly inserted note
 
-def train_ai_ta(class_name, note_content, title = "title"):
+def train_ai_ta(class_name, note_content, title, action):
     c = st.session_state.db_conn.cursor()
-
     # Get the serialized index of the AI-TA for the class
     c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
     serialized_index = c.fetchone()[0]
     class_ta = AI_TA.deserialize(serialized_index)
 
     #Train the AI-TA with the new note content
-    class_ta.train(note_content, title)
+    if action == "train":
+        class_ta.train(note_content, title)
+    elif action == "update":
+        class_ta.update(note_content, title)
 
     # Update the serialized index in the database
     c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
