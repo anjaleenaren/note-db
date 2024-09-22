@@ -186,14 +186,14 @@ def delete_file_from_note(note_id, file_url):
 def get_notes(class_name):
     c = st.session_state.db_conn.cursor()
     try:
-        c.execute("""SELECT notes.id, notes.content, notes.timestamp, notes.file_urls, notes.audio_urls
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
                      ORDER BY notes.timestamp DESC""", (class_name,))
     except sqlite3.OperationalError:
         # If the query fails, fall back to the original schema
-        c.execute("""SELECT notes.id, notes.content, notes.timestamp, NULL as file_urls, NULL as audio_urls
+        c.execute("""SELECT notes.id, notes.content, notes.timestamp
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
@@ -462,10 +462,76 @@ if authentication_status:
                         st.session_state.current_note_content = ""
                     st.rerun()
 
-        # else:
-        #     st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
-    else:
-        st.info("Please select a class from the sidebar or add a new one.")
+    if audio_files:
+        for i, audio_file in enumerate(audio_files):
+            st.audio(audio_file)
+            
+            # Check if transcription is already done
+            if audio_file.name not in st.session_state.transcribed_texts:
+                with st.spinner(f"Transcribing {audio_file.name}..."):
+                    transcribed_text = cached_transcribe_audio(audio_file.read())
+                st.session_state.transcribed_texts[audio_file.name] = transcribed_text
+            else:
+                transcribed_text = st.session_state.transcribed_texts[audio_file.name]
+            
+            st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
+            if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
+                note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
+                st.session_state.current_note_content = note_content
+                st.rerun()
+    
+    # Save button for the current note
+    if st.button("Save Note"):
+        if st.session_state.current_note_id:
+            update_note(st.session_state.current_note_id, note_content, files, audio_files)
+            st.success("Note updated!")
+        else:
+            add_note(selected_class, note_content, files, audio_files)
+            st.success("New note added!")
+        st.session_state.current_note_id = None
+        st.session_state.current_note_content = ""
+        st.rerun()
+    
+    # Display existing notes
+    st.subheader("Existing Notes")
+
+    c = st.session_state.db_conn.cursor()
+    c.execute("""SELECT notes.id, notes.content
+                     FROM notes 
+                     JOIN classes ON notes.class_id = classes.id 
+                     WHERE classes.name = ?
+                     ORDER BY notes.timestamp DESC""", (selected_class,))
+    notes_data = c.fetchall()
+    
+    for note_id, note_content in notes_data:
+        container = st.container(border=True)
+        col1, col2, col3, col4, col5= container.columns(5, vertical_alignment="center")
+        with col1:
+            col1.markdown(f"### Note {note_id}")
+        with col4:
+            if st.button("Edit Note", key=f"edit_note_{note_id}"):
+                if st.session_state.current_note_id:
+                    update_note(st.session_state.current_note_id, note_content)
+                st.session_state.current_note_id = note_id
+                st.session_state.current_note_content = get_note_by_id(note_id)
+                st.rerun()
+        with col5:
+            if st.button("Delete Note", key=f"delete_note_{note_id}"):
+                delete_note(note_id)
+                if st.session_state.current_note_id == note_id:
+                    st.session_state.current_note_id = None
+                    st.session_state.current_note_content = ""
+                st.rerun()
+        container.write(f"{note_content[:300]}...")
+        image_number = note_id % 2 +1
+        container.image(f"user_profiles/{image_number}.jpg")
+       
+        
+
+    # else:
+    #     st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
+else:
+    st.info("Please select a class from the sidebar or add a new one.")
 
 # Close the database connection when the app is done
 # st.on_script_run.add(st.session_state.db_conn.close)
