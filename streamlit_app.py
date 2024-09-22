@@ -136,10 +136,10 @@ def add_note(class_name, note_content, note_title, files=None, audio_files=None)
               (class_id, note_title, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
     
     new_note_id = c.lastrowid  # Get the id of the newly inserted note
- 
+    train_ai_ta(class_name, note_content, note_title, new_note_id, True)
     return new_note_id  # Return the id of the newly inserted note
 
-def train_ai_ta(class_name, note_content, title, action):
+def train_ai_ta(class_name, note_content, title, note_id, new_note):
     c = st.session_state.db_conn.cursor()
     # Get the serialized index of the AI-TA for the class
     c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
@@ -147,16 +147,25 @@ def train_ai_ta(class_name, note_content, title, action):
     class_ta = AI_TA.deserialize(serialized_index)
 
     #Train the AI-TA with the new note content
-    if action == "train":
-        class_ta.train(note_content, title)
-    elif action == "update":
-        class_ta.update(note_content, title)
+    if new_note:
+        class_ta.add_doc(note_content, title, str(note_id))
+    else:
+        class_ta.update_doc(note_content, title, str(note_id))
 
     # Update the serialized index in the database
     c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
     st.session_state.db_conn.commit()
 
-def update_note(note_id, note_content, note_title, files=None, audio_files=None):
+def delete_from_ai_ta(class_name, note_id):
+    c = st.session_state.db_conn.cursor()
+    c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
+    serialized_index = c.fetchone()[0]
+    class_ta = AI_TA.deserialize(serialized_index)
+    class_ta.delete_doc(str(note_id))
+    c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
+    st.session_state.db_conn.commit()
+
+def update_note(note_id, note_content, note_title, class_name, files=None, audio_files=None):
     print(f"Update note id {note_id} {note_title}")
     c = st.session_state.db_conn.cursor()
     
@@ -192,6 +201,7 @@ def update_note(note_id, note_content, note_title, files=None, audio_files=None)
                  WHERE id = ?""",
               (note_title, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls), note_id))
     st.session_state.db_conn.commit()
+    train_ai_ta(class_name, note_content, note_title, note_id, False)
 
 def delete_file_from_note(note_id, file_url):
     c = st.session_state.db_conn.cursor()
@@ -249,7 +259,7 @@ def save_note(selected_class, note_id, note_content, note_title, files=None, aud
         note_title = generate_title(note_content)
     print("Note title = " + note_title)
     if note_id:
-        update_note(note_id, note_content, note_title, files, audio_files)
+        update_note(note_id, note_content, note_title, selected_class, files, audio_files)
         st.success("Note updated!")
     else:
         new_note_id = add_note(selected_class, note_content, note_title, files, audio_files)
@@ -263,10 +273,11 @@ def get_note_by_id(note_id):
     return c.fetchone()
 
 # Add this new function to delete a note
-def delete_note(note_id):
+def delete_note(class_name, note_id):
     c = st.session_state.db_conn.cursor()
     c.execute("DELETE FROM notes WHERE id = ?", (note_id,))
     st.session_state.db_conn.commit()
+    delete_from_ai_ta(class_name, note_id)
 
 # Add these new functions for S3 operations
 def upload_to_s3(file, bucket_name, object_name):
@@ -307,7 +318,7 @@ def generate_title(content):
             
             return ret.content
         except Exception as e:
-            st.error(f"Error generating title: {str(e)}")
+            print("Error generating title: ", str(e))
             return "Untitled Note"
 
 def stream_transcribe_audio(audio_file, selected_class, note_id, note_title, note_content):
@@ -422,6 +433,24 @@ if authentication_status:
         else:
             st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
 
+        # View documents in vector store
+        if st.button("View Documents in Vector Store"):
+            c = st.session_state.db_conn.cursor()
+            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
+            serialized_index = c.fetchone()[0]
+            class_ta = AI_TA.deserialize(serialized_index)
+            documents = class_ta.get_documents()
+            
+            if documents:
+                st.subheader("Documents in Vector Store")
+                for doc in documents:
+                    st.write(f"ID: {doc['id']}")
+                    st.write(f"Title: {doc['title']}")
+                    st.write(f"Content: {doc['content']}")
+                    st.write("---")
+            else:
+                st.info("No documents found in the vector store for this class.")
+
         st.subheader(f"Notes for {selected_class}")
         
         # Initialize session state for current note
@@ -492,6 +521,7 @@ if authentication_status:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Save Note"):
+                print("Save note button clicked")
                 if not st.session_state.current_note_content:
                     st.warning("Note content is empty. Please add some content before saving.")
                 else: 
@@ -527,7 +557,7 @@ if authentication_status:
                 if st.button(f"{date_only}: {note_title} - {note_content[:50]}...", key=f"note_{note_id}"):
                     if st.session_state.current_note_id:
                         print("Update note before switching")
-                        update_note(st.session_state.current_note_id, note_content, note_title)
+                        update_note(st.session_state.current_note_id, note_content, note_title, selected_class)
                     st.session_state.current_note_id = note_id
                     title, content = get_note_by_id(note_id)
                     st.session_state.current_note_title = title
@@ -554,7 +584,7 @@ if authentication_status:
                             st.rerun()
             with col4:
                 if st.button("Delete Note", key=f"delete_note_{note_id}"):
-                    delete_note(note_id)
+                    delete_note(selected_class, note_id)
                     if st.session_state.current_note_id == note_id:
                         st.session_state.current_note_id = None
                         st.session_state.current_note_content = ""
