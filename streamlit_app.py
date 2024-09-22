@@ -437,8 +437,8 @@ if selected_class:
                     st.session_state.current_note_content = ""
                 st.rerun()
 
-    else:
-        st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
+    # else:
+    #     st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
 else:
     st.info("Please select a class from the sidebar or add a new one.")
 
