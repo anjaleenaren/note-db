@@ -19,10 +19,10 @@ class AI_TA:
     def serialize(self):
         return pickle.dumps(self)
 
-    def train(self, content):
+    def train(self, content, title):
         new_document = Document(text=content)
         self.index.insert(new_document)
-        self.train_history.append(content)
+        self.train_history.append(title)
         print(f"Training complete with materials: {content}")
 
     def query(self, query):

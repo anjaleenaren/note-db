@@ -133,18 +133,23 @@ def add_note(class_name, note_content, note_title, files=None, audio_files=None)
               (class_id, note_title, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
     
     new_note_id = c.lastrowid  # Get the id of the newly inserted note
-    
-    # Update the TA index
+ 
+    return new_note_id  # Return the id of the newly inserted note
+
+def train_ai_ta(class_name, note_content, title = "title"):
+    c = st.session_state.db_conn.cursor()
+
+    # Get the serialized index of the AI-TA for the class
     c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (class_name,))
     serialized_index = c.fetchone()[0]
     class_ta = AI_TA.deserialize(serialized_index)
-    print("class_ta.class_name: ", class_ta.class_name)
-    print("class_ta.history: ", class_ta.train_history)
-    class_ta.train(note_content)
+
+    #Train the AI-TA with the new note content
+    class_ta.train(note_content, title)
+
+    # Update the serialized index in the database
     c.execute("UPDATE ta_indexes SET serialized_index = ? WHERE class_name = ?", (class_ta.serialize(), class_name))
     st.session_state.db_conn.commit()
-    
-    return new_note_id  # Return the id of the newly inserted note
 
 def update_note(note_id, note_content, note_title, files=None, audio_files=None):
     print(f"Update note id {note_id} {note_title}")
