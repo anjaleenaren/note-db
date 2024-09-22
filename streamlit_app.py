@@ -22,6 +22,9 @@ import openai
 import numpy as np
 from pydub import AudioSegment
 import time
+import streamlit_authenticator as stauth
+import yaml
+from yaml.loader import SafeLoader
 
 load_dotenv()
 
@@ -347,190 +350,216 @@ def stream_transcribe_audio(audio_file, selected_class, note_id, note_title, not
     
     return full_transcript.strip(), note_id, note_title
 
-# Streamlit UI
-st.title("🎓 Class Notes Manager")
+# Load configuration file
+with open('config.yaml') as file:
+    config = yaml.load(file, Loader=SafeLoader)
 
-# Sidebar for class management
-st.sidebar.title("Class Management")
+# Create an authentication object
+authenticator = stauth.Authenticate(
+    config['credentials'],
+    config['cookie']['name'],
+    config['cookie']['key'],
+    config['cookie']['expiry_days'],
+    config['preauthorized']
+)
 
-# Display existing classes
-st.sidebar.subheader("Existing Classes")
-classes = get_classes()
-selected_class = st.sidebar.selectbox("Select a class:", [""] + classes)
+# Add login widget
+name, authentication_status, username = authenticator.login()
 
-# Add new class
-st.sidebar.subheader("Add a New Class")
-new_class = st.sidebar.text_input("Add a new class:")
-if st.sidebar.button("Add Class"):
-    if new_class:
-        add_class(new_class)
-        st.sidebar.success(f"Added {new_class}")
-        st.rerun()
-
-# OpenAI API Key input
-st.sidebar.subheader("Settings")
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-
-# Main content area
-if selected_class:
-    # AI-TA chat
-    st.subheader("AI TA Chat :)")
-    if openai_api_key.startswith("sk-"):
-        chat_input = st.text_input("Ask AI-TA a question about this class:")
-        if st.button("Ask"):
-            c = st.session_state.db_conn.cursor()
-            c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
-            serialized_index = c.fetchone()[0]
-            print("serialized_index fetched! ")
-            class_ta = AI_TA.deserialize(serialized_index)
-            print("class_ta deseralized ", class_ta.class_name)
-            openai.api_key = openai_api_key
-            response = class_ta.query(chat_input)
-            print("response generated ", response)
-            st.info(response)
-    else:
-        st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
-
-    st.subheader(f"Notes for {selected_class}")
+# Check authentication status
+if authentication_status:
+    authenticator.logout('Logout', 'sidebar')
+    st.write(f'Welcome *{name}*')
     
-    # Initialize session state for current note
-    if 'current_note_id' not in st.session_state:
-        st.session_state.current_note_id = None
-    if 'current_note_content' not in st.session_state:
-        st.session_state.current_note_content = ""
-    if 'current_note_title' not in st.session_state:
-        st.session_state.current_note_title = ""
-    if 'transcription_done' not in st.session_state:
-        st.session_state.transcription_done = False
+    # Streamlit UI
+    st.title("🎓 Class Notes Manager")
 
-    # Text input for notes
-    note_title = st.text_input("Note Title:", value=st.session_state.current_note_title)
-    note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
-    
-    # File upload for multiple images/PDFs/PPTs
-    files = st.file_uploader("Upload images, PDFs, or PowerPoint files (text extraction will be performed)", 
-                             type=["png", "jpg", "jpeg", "pdf", "ppt", "pptx"], 
-                             accept_multiple_files=True)
-    if files:
-        for i, file in enumerate(files):
-            if file.type == "application/pdf":
-                st.write(f"PDF uploaded: {file.name}")
-            elif file.type in ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.ms-powerpoint"]:
-                st.write(f"PowerPoint uploaded: {file.name}")
-            else:
-                st.image(file, caption=f"Uploaded Image: {file.name}", width=200)
-            extracted_text = extract_text_from_file(file)
-            st.text_area(f"Extracted Text from {file.name}", value=extracted_text, height=150)
-            if st.button(f"Append Extracted Text to Note (File {i+1})", key=f"append_button_{i}"):
-                note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
-                st.session_state.current_note_content = note_content
-                save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
-                st.rerun()
-    
-    # Audio file upload
-    audio_files = st.file_uploader("Upload audio files (transcription will be performed)", 
-                                   type=["mp3", "wav", "m4a"], 
-                                   accept_multiple_files=True)
-    
-    if 'transcribed_texts' not in st.session_state:
-        st.session_state.transcribed_texts = {}
+    # Sidebar for class management
+    st.sidebar.title("Class Management")
 
-    if audio_files:
-        for i, audio_file in enumerate(audio_files):
-            st.audio(audio_file)
-            
-            if not st.session_state.transcription_done:
-                with st.spinner(f"Transcribing {audio_file.name}..."):
-                    transcribed_text, note_id, note_title = stream_transcribe_audio(audio_file, selected_class, st.session_state.current_note_id, note_title, note_content)
-                    st.session_state.current_note_id = note_id
-                    st.session_state.current_note_title = note_title
-                    st.session_state.current_note_content = note_content  # Update the current note content
-                    st.session_state.transcribed_texts[audio_file.name] = transcribed_text
-                    st.session_state.transcription_done = True
-            
-            if audio_file.name in st.session_state.transcribed_texts:
-                transcribed_text = st.session_state.transcribed_texts[audio_file.name]
-                st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
-                if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
-                    note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
+    # Display existing classes
+    st.sidebar.subheader("Existing Classes")
+    classes = get_classes()
+    selected_class = st.sidebar.selectbox("Select a class:", [""] + classes)
+
+    # Add new class
+    st.sidebar.subheader("Add a New Class")
+    new_class = st.sidebar.text_input("Add a new class:")
+    if st.sidebar.button("Add Class"):
+        if new_class:
+            add_class(new_class)
+            st.sidebar.success(f"Added {new_class}")
+            st.rerun()
+
+    # OpenAI API Key input
+    st.sidebar.subheader("Settings")
+    openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+
+    # Main content area
+    if selected_class:
+        # AI-TA chat
+        st.subheader("AI TA Chat :)")
+        if openai_api_key.startswith("sk-"):
+            chat_input = st.text_input("Ask AI-TA a question about this class:")
+            if st.button("Ask"):
+                c = st.session_state.db_conn.cursor()
+                c.execute("SELECT serialized_index FROM ta_indexes WHERE class_name = ?", (selected_class,))
+                serialized_index = c.fetchone()[0]
+                print("serialized_index fetched! ")
+                class_ta = AI_TA.deserialize(serialized_index)
+                print("class_ta deseralized ", class_ta.class_name)
+                openai.api_key = openai_api_key
+                response = class_ta.query(chat_input)
+                print("response generated ", response)
+                st.info(response)
+        else:
+            st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
+
+        st.subheader(f"Notes for {selected_class}")
+        
+        # Initialize session state for current note
+        if 'current_note_id' not in st.session_state:
+            st.session_state.current_note_id = None
+        if 'current_note_content' not in st.session_state:
+            st.session_state.current_note_content = ""
+        if 'current_note_title' not in st.session_state:
+            st.session_state.current_note_title = ""
+        if 'transcription_done' not in st.session_state:
+            st.session_state.transcription_done = False
+
+        # Text input for notes
+        note_title = st.text_input("Note Title:", value=st.session_state.current_note_title)
+        note_content = st.text_area("Edit note:", value=st.session_state.current_note_content)
+        
+        # File upload for multiple images/PDFs/PPTs
+        files = st.file_uploader("Upload images, PDFs, or PowerPoint files (text extraction will be performed)", 
+                                 type=["png", "jpg", "jpeg", "pdf", "ppt", "pptx"], 
+                                 accept_multiple_files=True)
+        if files:
+            for i, file in enumerate(files):
+                if file.type == "application/pdf":
+                    st.write(f"PDF uploaded: {file.name}")
+                elif file.type in ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.ms-powerpoint"]:
+                    st.write(f"PowerPoint uploaded: {file.name}")
+                else:
+                    st.image(file, caption=f"Uploaded Image: {file.name}", width=200)
+                extracted_text = extract_text_from_file(file)
+                st.text_area(f"Extracted Text from {file.name}", value=extracted_text, height=150)
+                if st.button(f"Append Extracted Text to Note (File {i+1})", key=f"append_button_{i}"):
+                    note_content += f"\n\nExtracted Text from {file.name}:\n{extracted_text}"
                     st.session_state.current_note_content = note_content
                     save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
                     st.rerun()
-    
-    # Save and New Note buttons
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Save Note"):
-            if not st.session_state.current_note_content:
-                st.warning("Note content is empty. Please add some content before saving.")
-            else: 
-                save_note(selected_class, st.session_state.current_note_id, note_content, note_title, files, audio_files)
+        
+        # Audio file upload
+        audio_files = st.file_uploader("Upload audio files (transcription will be performed)", 
+                                       type=["mp3", "wav", "m4a"], 
+                                       accept_multiple_files=True)
+        
+        if 'transcribed_texts' not in st.session_state:
+            st.session_state.transcribed_texts = {}
+
+        if audio_files:
+            for i, audio_file in enumerate(audio_files):
+                st.audio(audio_file)
+                
+                if not st.session_state.transcription_done:
+                    with st.spinner(f"Transcribing {audio_file.name}..."):
+                        transcribed_text, note_id, note_title = stream_transcribe_audio(audio_file, selected_class, st.session_state.current_note_id, note_title, note_content)
+                        st.session_state.current_note_id = note_id
+                        st.session_state.current_note_title = note_title
+                        st.session_state.current_note_content = note_content  # Update the current note content
+                        st.session_state.transcribed_texts[audio_file.name] = transcribed_text
+                        st.session_state.transcription_done = True
+                
+                if audio_file.name in st.session_state.transcribed_texts:
+                    transcribed_text = st.session_state.transcribed_texts[audio_file.name]
+                    st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
+                    if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
+                        note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
+                        st.session_state.current_note_content = note_content
+                        save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
+                        st.rerun()
+        
+        # Save and New Note buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Save Note"):
+                if not st.session_state.current_note_content:
+                    st.warning("Note content is empty. Please add some content before saving.")
+                else: 
+                    save_note(selected_class, st.session_state.current_note_id, note_content, note_title, files, audio_files)
+                    st.session_state.current_note_id = None
+                    st.session_state.current_note_content = ""
+                    st.session_state.current_note_title = ""
+                    st.session_state.transcribed_texts = {}
+                    st.session_state.transcription_done = False  # Reset the transcription flag
+                st.rerun()
+        
+        with col2:
+            if st.button("New Note"):
                 st.session_state.current_note_id = None
                 st.session_state.current_note_content = ""
                 st.session_state.current_note_title = ""
                 st.session_state.transcribed_texts = {}
                 st.session_state.transcription_done = False  # Reset the transcription flag
-            st.rerun()
-    
-    with col2:
-        if st.button("New Note"):
-            st.session_state.current_note_id = None
-            st.session_state.current_note_content = ""
-            st.session_state.current_note_title = ""
-            st.session_state.transcribed_texts = {}
-            st.session_state.transcription_done = False  # Reset the transcription flag
-            # Clear file uploads
-            st.session_state.files = None
-            st.session_state.audio_files = None
-            # Clear extracted text
-            if 'extracted_texts' in st.session_state:
-                del st.session_state.extracted_texts
-            st.rerun()
-
-    # Display existing notes
-    st.subheader("Existing Notes")
-    for note_id, note_content, timestamp, file_urls, audio_urls, note_title in get_notes(selected_class):
-        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
-        with col1:
-            date_only = timestamp.split()[0]
-            if st.button(f"{date_only}: {note_title} - {note_content[:50]}...", key=f"note_{note_id}"):
-                if st.session_state.current_note_id:
-                    print("Update note before switching")
-                    update_note(st.session_state.current_note_id, note_content, note_title)
-                st.session_state.current_note_id = note_id
-                title, content = get_note_by_id(note_id)
-                st.session_state.current_note_title = title
-                st.session_state.current_note_content = content
+                # Clear file uploads
+                st.session_state.files = None
+                st.session_state.audio_files = None
+                # Clear extracted text
+                if 'extracted_texts' in st.session_state:
+                    del st.session_state.extracted_texts
                 st.rerun()
-        with col2:
-            if file_urls:
-                for file_url in file_urls.split(','):
-                    if file_url.endswith(".pdf"):
-                        st.write("PDF")
-                    elif file_url.endswith((".ppt", ".pptx")):
-                        st.write("PowerPoint")
-                    else:
-                        st.image(file_url, width=100)
-                    if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
-                        delete_file_from_note(note_id, file_url)
-                        st.rerun()
-        with col3:
-            if audio_urls:
-                for audio_url in audio_urls.split(','):
-                    st.audio(audio_url)
-                    if st.button("Delete Audio", key=f"delete_audio_{note_id}_{audio_url}"):
-                        delete_file_from_note(note_id, audio_url)
-                        st.rerun()
-        with col4:
-            if st.button("Delete Note", key=f"delete_note_{note_id}"):
-                delete_note(note_id)
-                if st.session_state.current_note_id == note_id:
-                    st.session_state.current_note_id = None
-                    st.session_state.current_note_content = ""
-                    st.session_state.current_note_title = ""
-                st.rerun()
-else:
-    st.info("Please select a class from the sidebar or add a new one.")
 
-# Close the database connection when the app is done
-# st.on_script_run.add(st.session_state.db_conn.close)
+        # Display existing notes
+        st.subheader("Existing Notes")
+        for note_id, note_content, timestamp, file_urls, audio_urls, note_title in get_notes(selected_class):
+            col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+            with col1:
+                date_only = timestamp.split()[0]
+                if st.button(f"{date_only}: {note_title} - {note_content[:50]}...", key=f"note_{note_id}"):
+                    if st.session_state.current_note_id:
+                        print("Update note before switching")
+                        update_note(st.session_state.current_note_id, note_content, note_title)
+                    st.session_state.current_note_id = note_id
+                    title, content = get_note_by_id(note_id)
+                    st.session_state.current_note_title = title
+                    st.session_state.current_note_content = content
+                    st.rerun()
+            with col2:
+                if file_urls:
+                    for file_url in file_urls.split(','):
+                        if file_url.endswith(".pdf"):
+                            st.write("PDF")
+                        elif file_url.endswith((".ppt", ".pptx")):
+                            st.write("PowerPoint")
+                        else:
+                            st.image(file_url, width=100)
+                        if st.button("Delete File", key=f"delete_file_{note_id}_{file_url}"):
+                            delete_file_from_note(note_id, file_url)
+                            st.rerun()
+            with col3:
+                if audio_urls:
+                    for audio_url in audio_urls.split(','):
+                        st.audio(audio_url)
+                        if st.button("Delete Audio", key=f"delete_audio_{note_id}_{audio_url}"):
+                            delete_file_from_note(note_id, audio_url)
+                            st.rerun()
+            with col4:
+                if st.button("Delete Note", key=f"delete_note_{note_id}"):
+                    delete_note(note_id)
+                    if st.session_state.current_note_id == note_id:
+                        st.session_state.current_note_id = None
+                        st.session_state.current_note_content = ""
+                        st.session_state.current_note_title = ""
+                    st.rerun()
+    else:
+        st.info("Please select a class from the sidebar or add a new one.")
+
+    # Close the database connection when the app is done
+    # st.on_script_run.add(st.session_state.db_conn.close)
+
+elif authentication_status == False:
+    st.error('Username/password is incorrect')
+elif authentication_status == None:
+    st.warning('Please enter your username and password')
