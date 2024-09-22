@@ -496,18 +496,21 @@ if authentication_status:
     st.subheader("Existing Notes")
 
     c = st.session_state.db_conn.cursor()
-    c.execute("""SELECT notes.id, notes.content
+    c.execute("""SELECT notes.id, notes.content, notes.title
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
                      ORDER BY notes.timestamp DESC""", (selected_class,))
     notes_data = c.fetchall()
     
-    for note_id, note_content in notes_data:
+    for note_id, note_content, note_title in notes_data:
         container = st.container(border=True)
         col1, col2, col3, col4, col5= container.columns(5, vertical_alignment="center")
         with col1:
-            col1.markdown(f"### Note {note_id}")
+            if note_title:
+                col1.markdown(f"### {note_title}")
+            else:   
+                col1.markdown(f"### Note {note_id}")
         with col4:
             if st.button("Edit Note", key=f"edit_note_{note_id}"):
                 if st.session_state.current_note_id:
