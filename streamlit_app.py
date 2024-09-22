@@ -19,6 +19,10 @@ import tempfile
 from functools import lru_cache
 from ai_ta import AI_TA
 import openai
+import numpy as np
+from pydub import AudioSegment
+import time
+
 load_dotenv()
 
 # Database setup
@@ -241,7 +245,7 @@ def save_note(selected_class, note_id, note_content, note_title, files=None, aud
         new_note_id = add_note(selected_class, note_content, note_title, files, audio_files)
         st.session_state.current_note_id = new_note_id  # Save the new note id
         st.success("New note added!")
-    return note_id or new_note_id
+    return (note_id or new_note_id, note_title)
 
 def get_note_by_id(note_id):
     c = st.session_state.db_conn.cursor()
@@ -296,6 +300,53 @@ def generate_title(content):
             st.error(f"Error generating title: {str(e)}")
             return "Untitled Note"
 
+def stream_transcribe_audio(audio_file, selected_class, note_id, note_title, note_content):
+    model = whisper.load_model("base")
+    
+    # Load the audio file
+    audio = AudioSegment.from_file(audio_file)
+    
+    # Set chunk size (e.g., 10 seconds)
+    chunk_duration_ms = 60 * 1000
+    
+    full_transcript = ""
+    placeholder = st.empty()
+    
+    for i in range(0, len(audio), chunk_duration_ms):
+        # Extract a chunk of audio
+        chunk = audio[i:i+chunk_duration_ms]
+        
+        # Export the chunk to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            chunk.export(tmp_file.name, format="wav")
+            tmp_file_path = tmp_file.name
+        
+        # Transcribe the chunk
+        result = model.transcribe(tmp_file_path)
+        chunk_transcript = result["text"]
+        
+        # Append to full transcript and update display
+        full_transcript += chunk_transcript + " "
+        placeholder.text_area("Transcription in progress:", full_transcript, height=150)
+        
+        # Append the chunk transcript to the note content and save
+        if i == 0:
+            updated_content = note_content + f"Audio Transcription: {chunk_transcript}"
+        else: 
+            updated_content = note_content + f"{chunk_transcript}"
+        note_id, note_title = save_note(selected_class, note_id, updated_content, note_title)
+        note_content = updated_content  # Update note_content for the next iteration
+        
+        # Clean up the temporary file
+        os.unlink(tmp_file_path)
+        
+        # Simulate processing time
+        time.sleep(0.1)
+
+        # st.rerun()
+    
+    return full_transcript.strip(), note_id, note_title
+
 # Streamlit UI
 st.title("🎓 Class Notes Manager")
 
@@ -349,6 +400,8 @@ if selected_class:
         st.session_state.current_note_content = ""
     if 'current_note_title' not in st.session_state:
         st.session_state.current_note_title = ""
+    if 'transcription_done' not in st.session_state:
+        st.session_state.transcription_done = False
 
     # Text input for notes
     note_title = st.text_input("Note Title:", value=st.session_state.current_note_title)
@@ -386,20 +439,23 @@ if selected_class:
         for i, audio_file in enumerate(audio_files):
             st.audio(audio_file)
             
-            # Check if transcription is already done
-            if audio_file.name not in st.session_state.transcribed_texts:
+            if not st.session_state.transcription_done:
                 with st.spinner(f"Transcribing {audio_file.name}..."):
-                    transcribed_text = cached_transcribe_audio(audio_file.read())
-                st.session_state.transcribed_texts[audio_file.name] = transcribed_text
-            else:
-                transcribed_text = st.session_state.transcribed_texts[audio_file.name]
+                    transcribed_text, note_id, note_title = stream_transcribe_audio(audio_file, selected_class, st.session_state.current_note_id, note_title, note_content)
+                    st.session_state.current_note_id = note_id
+                    st.session_state.current_note_title = note_title
+                    st.session_state.current_note_content = note_content  # Update the current note content
+                    st.session_state.transcribed_texts[audio_file.name] = transcribed_text
+                    st.session_state.transcription_done = True
             
-            st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
-            if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
-                note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
-                st.session_state.current_note_content = note_content
-                save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
-                st.rerun()
+            if audio_file.name in st.session_state.transcribed_texts:
+                transcribed_text = st.session_state.transcribed_texts[audio_file.name]
+                st.text_area(f"Transcribed Text from {audio_file.name}", value=transcribed_text, height=150)
+                if st.button(f"Append Transcribed Text to Note (Audio {i+1})", key=f"append_audio_button_{i}"):
+                    note_content += f"\n\nTranscribed Text from {audio_file.name}:\n{transcribed_text}"
+                    st.session_state.current_note_content = note_content
+                    save_note(selected_class, st.session_state.current_note_id, note_content, note_title)
+                    st.rerun()
     
     # Save and New Note buttons
     col1, col2 = st.columns(2)
@@ -408,11 +464,12 @@ if selected_class:
             if not st.session_state.current_note_content:
                 st.warning("Note content is empty. Please add some content before saving.")
             else: 
-                new_id = save_note(selected_class, st.session_state.current_note_id, note_content, note_title, files, audio_files)
+                save_note(selected_class, st.session_state.current_note_id, note_content, note_title, files, audio_files)
                 st.session_state.current_note_id = None
                 st.session_state.current_note_content = ""
                 st.session_state.current_note_title = ""
                 st.session_state.transcribed_texts = {}
+                st.session_state.transcription_done = False  # Reset the transcription flag
             st.rerun()
     
     with col2:
@@ -421,6 +478,7 @@ if selected_class:
             st.session_state.current_note_content = ""
             st.session_state.current_note_title = ""
             st.session_state.transcribed_texts = {}
+            st.session_state.transcription_done = False  # Reset the transcription flag
             # Clear file uploads
             st.session_state.files = None
             st.session_state.audio_files = None
