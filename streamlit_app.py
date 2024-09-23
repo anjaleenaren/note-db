@@ -43,7 +43,7 @@ def init_db():
                   FOREIGN KEY (class_name) REFERENCES classes(name))''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS notes
-                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT,
+                 (id INTEGER PRIMARY KEY, class_id INTEGER, content TEXT, timestamp DATETIME, file_urls TEXT, audio_urls TEXT, upvotes INTEGER DEFAULT 0, downvotes INTEGER DEFAULT 0,
                  FOREIGN KEY (class_id) REFERENCES classes(id))''')
     
     # Check if file_urls and audio_urls columns exist, if not, add them
@@ -53,6 +53,12 @@ def init_db():
         c.execute("ALTER TABLE notes ADD COLUMN file_urls TEXT")
     if 'audio_urls' not in columns:
         c.execute("ALTER TABLE notes ADD COLUMN audio_urls TEXT")
+    
+    # Check if upvotes and downvotes columns exist, if not, add them
+    if 'upvotes' not in columns:
+        c.execute("ALTER TABLE notes ADD COLUMN upvotes INTEGER DEFAULT 0")
+    if 'downvotes' not in columns:
+        c.execute("ALTER TABLE notes ADD COLUMN downvotes INTEGER DEFAULT 0")
     
     conn.commit()
     return conn
@@ -141,8 +147,8 @@ def add_note(class_name, note_content, files=None, audio_files=None):
     # Strip multiple consecutive new lines in note_content
     note_content = re.sub(r'\n{2,}', '\n', note_content)
     
-    c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_urls) 
-                 VALUES (?, ?, ?, ?, ?)""",
+    c.execute("""INSERT INTO notes (class_id, content, timestamp, file_urls, audio_urls, upvotes, downvotes) 
+                 VALUES (?, ?, ?, ?, ?, 0, 0)""",
               (class_id, note_content, datetime.datetime.now(), ','.join(file_urls), ','.join(audio_urls)))
     
     # Update the TA index
@@ -284,6 +290,16 @@ def cached_transcribe_audio(file_content):
     result = model.transcribe(tmp_file_path)
     os.unlink(tmp_file_path)
     return result["text"]
+
+def upvote_note(note_id):
+    c = st.session_state.db_conn.cursor()
+    c.execute("UPDATE notes SET upvotes = upvotes + 1 WHERE id = ?", (note_id,))
+    st.session_state.db_conn.commit()
+
+def downvote_note(note_id):
+    c = st.session_state.db_conn.cursor()
+    c.execute("UPDATE notes SET upvotes = MAX(upvotes - 1, 0) WHERE id = ?", (note_id,))
+    st.session_state.db_conn.commit()
 
 # Streamlit UI
 
@@ -442,37 +458,50 @@ if authentication_status:
         st.subheader("Existing Notes")
 
         c = st.session_state.db_conn.cursor()
-        c.execute("""SELECT notes.id, notes.content
+        c.execute("""SELECT notes.id, notes.content, notes.upvotes
                      FROM notes 
                      JOIN classes ON notes.class_id = classes.id 
                      WHERE classes.name = ?
-                     ORDER BY notes.timestamp DESC""", (selected_class,))
+                     ORDER BY notes.upvotes DESC, notes.timestamp DESC""", (selected_class,))
         notes_data = c.fetchall()
         
-        for note_id, note_content in notes_data:
+        for note_id, note_content, upvotes in notes_data:
             container = st.container(border=True)
-            col1, col2, col3, col4, col5= container.columns(5, vertical_alignment="center")
-            with col1:
-                col1.markdown(f"### Note {note_id}")
-            with col4:
+            
+            # Top row with note ID, voting buttons, and counts
+            top_col1, top_col2, top_col3, top_col4 = container.columns([3, 1, 1, 1])
+            with top_col1:
+                top_col1.markdown(f"### Note {note_id}")
+            with top_col2:
+                if st.button("👍", key=f"upvote_{note_id}"):
+                    upvote_note(note_id)
+                    st.rerun()
+            with top_col3:
+                st.write(f"Votes: {upvotes}")
+            with top_col4:
+                if st.button("👎", key=f"downvote_{note_id}"):
+                    downvote_note(note_id)
+                    st.rerun()
+            
+            # Content and action buttons
+            content_col, action_col = container.columns([4, 1])
+            with content_col:
+                content_col.write(f"{note_content[:300]}...")
+                image_number = note_id % 2 + 1
+                content_col.image(f"user_profiles/{image_number}.jpg")
+            with action_col:
                 if st.button("Edit Note", key=f"edit_note_{note_id}"):
                     if st.session_state.current_note_id:
                         update_note(st.session_state.current_note_id, note_content)
                     st.session_state.current_note_id = note_id
                     st.session_state.current_note_content = get_note_by_id(note_id)
                     st.rerun()
-            with col5:
                 if st.button("Delete Note", key=f"delete_note_{note_id}"):
                     delete_note(note_id)
                     if st.session_state.current_note_id == note_id:
                         st.session_state.current_note_id = None
                         st.session_state.current_note_content = ""
                     st.rerun()
-            container.write(f"{note_content[:300]}...")
-            image_number = note_id % 2 +1
-            container.image(f"user_profiles/{image_number}.jpg")
-           
-            
 
     # else:
     #     st.warning("Please enter your OpenAI API key to use the AI-TA feature!", icon="⚠")
